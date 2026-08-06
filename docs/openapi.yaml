@@ -1,0 +1,788 @@
+openapi: "3.1.0"
+info:
+  title: Agent-API
+  version: "0.1.0"
+  description: >
+    Generischer API-Layer für Agenten (Mensch und KI) auf einen Baum aus
+    Markdown-/JSON-/PII-JSON-/Binärdateien. Eine Instanz verwaltet genau
+    einen Baum (kein Multi-Tenant-Modell, siehe spec.md §12). Grundlage:
+    docs/spec.md.
+  license:
+    name: proprietary
+
+servers:
+  - url: /api/v1
+    description: Basis-Pfad. Kein Tenant-Segment — eine Instanz je Baum/Projekt (spec.md §12).
+
+security:
+  - clientApiKey: []
+    userToken: []
+  - clientApiKey: []
+
+tags:
+  - name: Tree
+    description: Lesender Zugriff auf den Dateibaum (Listing, Einzeldatei, Binär-Download).
+  - name: Files
+    description: Schreibender Zugriff auf einzelne Dateien.
+  - name: Transactions
+    description: Atomare Mehrdateien-Operationen.
+  - name: Clients
+    description: Verwaltung registrierter Clients (Admin-only, spec.md §10).
+  - name: Audit
+    description: Abfrage des Audit-Logs (Admin-only, spec.md §9).
+
+paths:
+  /tree:
+    get:
+      operationId: getTree
+      tags: [Tree]
+      summary: Teilbaum auflisten
+      description: >
+        ACL-gefiltert (spec.md §8): Einträge ohne Read-Recht für den
+        aufrufenden (user_id, client_id) werden vollständig ausgeblendet,
+        nicht nur inhaltlich gesperrt.
+      parameters:
+        - name: root
+          in: query
+          required: false
+          schema: { type: string, default: "/" }
+          description: Nur diesen Teilbaum liefern.
+        - name: depth
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 2 }
+          description: "Ebenen unterhalb von root. 0 = nur Metadaten von root, 1 = nur direkte Kinder, ..."
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Pagination-Token einer vorherigen Antwort (pro Verzeichnisebene).
+      responses:
+        "200":
+          description: Teilbaum-Listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TreeResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "/file/{path}":
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      operationId: getFile
+      tags: [Tree]
+      summary: Datei lesen
+      description: >
+        Text-Kinds (md/json/pii.json): Volltext + Version im Response-Body.
+        `binary`: nur Metadaten, keine Bytes — dafür GET .../content (spec.md §4).
+      responses:
+        "200":
+          description: Metadaten (+ Inhalt bei Text-Kinds)
+          headers:
+            ETag: { schema: { type: string }, description: "= version, für If-None-Match-Caching" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileResponse" }
+        "304": { description: "Not Modified (If-None-Match traf zu)" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      parameters:
+        - $ref: "#/components/parameters/IfNoneMatch"
+    post:
+      operationId: writeFile
+      tags: [Files]
+      summary: Datei vollständig schreiben (Full Write / Upload)
+      description: >
+        Neue Datei anlegen oder vollständig ersetzen. Text-Kinds über
+        `application/json`, `binary` über `multipart/form-data` (spec.md §5).
+        `if_version` fehlt/leer bei Neuanlage, sonst Pflicht.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FullWriteTextRequest" }
+          multipart/form-data:
+            schema: { $ref: "#/components/schemas/FullWriteBinaryRequest" }
+      responses:
+        "200":
+          description: Geschrieben
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriteResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+    delete:
+      operationId: deleteFile
+      tags: [Files]
+      summary: Datei löschen
+      description: Immer explizit, immer mit `if_version` (spec.md §5).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeleteRequest" }
+      responses:
+        "204": { description: Gelöscht }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+
+  "/file/{path}/content":
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    get:
+      operationId: getFileContent
+      tags: [Tree]
+      summary: Rohbytes einer Binärdatei herunterladen
+      description: "Nur für `kind: binary`. Keine Text-Extraktion (spec.md §4) — bleibt außerhalb dieser API."
+      responses:
+        "200":
+          description: Rohbytes
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentEncoding: base64 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "kind ist kein `binary` (falscher Endpoint für diesen Dateityp)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  "/file/{path}/edit":
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      operationId: editFile
+      tags: [Files]
+      summary: str_replace-Patch (nur Text-Kinds)
+      description: >
+        `old_str` muss genau einmal im aktuellen Inhalt vorkommen (0 oder
+        >1 Treffer = 400). Doppelte Absicherung: Versions-Check UND exakter
+        String-Match (spec.md §5).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EditRequest" }
+      responses:
+        "200":
+          description: Geändert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriteResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+
+  "/file/{path}/append":
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      operationId: appendFile
+      tags: [Files]
+      summary: An Datei anhängen (nur Text-Kinds, kein old_str nötig)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppendRequest" }
+      responses:
+        "200":
+          description: Angehängt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriteResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+
+  /transaction:
+    post:
+      operationId: runTransaction
+      tags: [Transactions]
+      summary: Mehrere Datei-Operationen atomar ausführen
+      description: >
+        Zweiphasig serverseitig (Dry-Run-Validierung, dann Commit) — ein
+        Git-Commit über alle betroffenen Dateien (spec.md §6). Serialisiert
+        über die globale Write-Queue der Instanz.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransactionRequest" }
+      responses:
+        "200":
+          description: Alle Operationen erfolgreich, ein Commit erzeugt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransactionResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "Mindestens eine Operation ungültig (Version/String-Match/ACL) — nichts wurde geschrieben"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransactionConflictError" }
+
+  /system/clients:
+    get:
+      operationId: listClients
+      tags: [Clients]
+      summary: Registrierte Clients auflisten (Admin-only)
+      responses:
+        "200":
+          description: Liste, ohne geheime Felder (api_key_hash, private Schlüssel — es gibt keine, nur public_key wird gespeichert)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ClientRegistryEntryPublic" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createClient
+      tags: [Clients]
+      summary: Neuen Client registrieren (Admin-only)
+      description: Der erzeugte `api_key` wird nur in dieser Antwort im Klartext zurückgegeben, danach nur noch als Hash gespeichert.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientRegistryEntryCreate" }
+      responses:
+        "201":
+          description: Erstellt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientRegistryEntryCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  "/system/clients/{client_id}":
+    parameters:
+      - name: client_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getClient
+      tags: [Clients]
+      summary: Einzelnen Client-Registry-Eintrag lesen (Admin-only)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientRegistryEntryPublic" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateClient
+      tags: [Clients]
+      summary: Client-Metadaten ändern (Admin-only)
+      description: z.B. `issues_user_tokens` umschalten. Schlüsselrotation und Widerruf laufen über eigene Endpunkte.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientRegistryEntryUpdate" }
+      responses:
+        "200":
+          description: Geändert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientRegistryEntryPublic" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: revokeClient
+      tags: [Clients]
+      summary: Client widerrufen (Admin-only, soft — kein Hard-Delete)
+      description: "Setzt `revoked: true`. Bereits ausgestellte User-Tokens bleiben bis `exp` gültig (max. 15 min, spec.md §10)."
+      responses:
+        "204": { description: Widerrufen }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "/system/clients/{client_id}/rotate-api-key":
+    parameters:
+      - name: client_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: rotateClientApiKey
+      tags: [Clients]
+      summary: API-Key eines Clients rotieren (Admin-only)
+      description: Alter Key wird sofort ungültig. Neuer Key nur in dieser Antwort im Klartext.
+      responses:
+        "200":
+          description: Rotiert
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiKeyIssued" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "/system/clients/{client_id}/signing-keys":
+    parameters:
+      - name: client_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: addSigningKey
+      tags: [Clients]
+      summary: Neuen Public Key für User-Token-Verifikation hinzufügen (Admin-only)
+      description: >
+        Rotation ohne Downtime: der Client generiert sein eigenes
+        Ed25519-Schlüsselpaar und registriert nur den Public Key hier — der
+        private Schlüssel verlässt den Client nie (spec.md §10/§15 im
+        Design-Dokument).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SigningKeyCreate" }
+      responses:
+        "201":
+          description: Hinzugefügt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SigningKey" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  "/system/clients/{client_id}/signing-keys/{kid}":
+    parameters:
+      - name: client_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: kid
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      operationId: revokeSigningKey
+      tags: [Clients]
+      summary: Public Key widerrufen (Admin-only, soft)
+      description: Setzt `revoked_at`. Bereits ausgestellte Tokens mit diesem `kid` werden ab sofort abgelehnt.
+      responses:
+        "204": { description: Widerrufen }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /system/audit:
+    get:
+      operationId: queryAuditLog
+      tags: [Audit]
+      summary: Audit-Log abfragen (Admin-only)
+      description: >
+        Deckt lesende UND schreibende Zugriffe ab (spec.md §9.2/§9.3),
+        inkl. PII-Kennzeichnung. Append-only-Quelle, rein lesender Endpunkt.
+      parameters:
+        - name: user_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: path_prefix
+          in: query
+          required: false
+          schema: { type: string }
+        - name: pii_only
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Nur Einträge mit `pii_accessed=true`.
+        - name: operation
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/AuditOperation" }
+        - name: from
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditLogResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    clientApiKey:
+      type: http
+      scheme: bearer
+      description: >
+        `Authorization: Bearer <client_api_key>` — beweist den client_id
+        (spec.md §10a). Auf JEDEM Call erforderlich.
+    userToken:
+      type: apiKey
+      in: header
+      name: X-User-Token
+      description: >
+        Signierter Kurzzeit-JWT (EdDSA, ~15 min gültig) — beweist den
+        user_id (spec.md §10b). Erforderlich bei jedem Call, AUSSER der
+        Client hat `fixed_user_id` in der Registry gesetzt (autonomer
+        Agent ohne Menschen dahinter) — dieser Fall ist in `security:`
+        oben als zweite, alternative Anforderung (nur clientApiKey)
+        hinterlegt. Welcher der beiden Fälle zutrifft, weiß der Server
+        erst zur Laufzeit aus der Client-Registry — bei fälschlich
+        fehlendem Token für einen nicht-autonomen Client lehnt er mit
+        401 ab.
+
+  parameters:
+    FilePath:
+      name: path
+      in: path
+      required: true
+      schema: { type: string }
+      description: >
+        Relativer POSIX-Pfad zur Datei INKLUSIVE Schrägstrichen, z.B.
+        `lv/sanitaer.md`. Wird server-seitig als Greedy-Match behandelt
+        (FastAPI `path`-Konverter) — Clients dürfen den Pfad nicht
+        segmentweise urlencodieren.
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema: { type: string }
+      description: Für Caching — entspricht der zuletzt gesehenen `version`.
+
+  schemas:
+    Kind:
+      type: string
+      enum: [dir, md, json, "pii.json", binary]
+
+    TreeEntry:
+      type: object
+      required: [path, kind]
+      properties:
+        path: { type: string }
+        kind: { $ref: "#/components/schemas/Kind" }
+        size: { type: integer, description: "Bytes, fehlt bei kind=dir" }
+        version: { type: string, description: "fehlt bei kind=dir" }
+        preview: { type: string, description: "nur Text-Kinds" }
+        mime_type: { type: string, description: "nur kind=binary" }
+
+    TreeResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/TreeEntry" }
+        next_cursor: { type: string }
+
+    FileResponse:
+      type: object
+      required: [path, kind, version]
+      properties:
+        path: { type: string }
+        kind: { $ref: "#/components/schemas/Kind" }
+        version: { type: string }
+        size: { type: integer }
+        mime_type: { type: string, description: "nur kind=binary" }
+        content: { type: string, description: "nur Text-Kinds, Volltext" }
+
+    WriteResult:
+      type: object
+      required: [path, version, commit_id]
+      properties:
+        path: { type: string }
+        version: { type: string, description: "neue Version nach dem Schreiben" }
+        commit_id: { type: string, description: "Git-Commit-SHA dieser Transaktion" }
+
+    EditRequest:
+      type: object
+      required: [old_str, new_str, if_version, reason]
+      properties:
+        old_str: { type: string }
+        new_str: { type: string }
+        if_version: { type: string }
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+
+    AppendRequest:
+      type: object
+      required: [content, if_version, reason]
+      properties:
+        content: { type: string }
+        if_version: { type: string }
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+
+    FullWriteTextRequest:
+      type: object
+      required: [content, reason]
+      properties:
+        content: { type: string }
+        if_version: { type: string, description: "weglassen bei Neuanlage" }
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+
+    FullWriteBinaryRequest:
+      type: object
+      required: [file, reason]
+      properties:
+        file: { type: string, contentEncoding: binary, description: "Rohbytes, multipart" }
+        if_version: { type: string, description: "= Hash der bisherigen Bytes; weglassen bei Neuanlage" }
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+
+    DeleteRequest:
+      type: object
+      required: [if_version, reason]
+      properties:
+        if_version: { type: string }
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+
+    TransactionOperationType:
+      type: string
+      enum: [edit, append, write, delete]
+
+    TransactionOperation:
+      type: object
+      required: [path, type]
+      description: >
+        Feldpflicht je nach `type`: edit -> old_str,new_str,if_version ·
+        append -> content,if_version · write -> content (if_version
+        optional bei Neuanlage) · delete -> if_version.
+      properties:
+        path: { type: string }
+        type: { $ref: "#/components/schemas/TransactionOperationType" }
+        old_str: { type: string }
+        new_str: { type: string }
+        content: { type: string }
+        if_version: { type: string }
+
+    TransactionRequest:
+      type: object
+      required: [reason, operations]
+      properties:
+        reason: { type: string, minLength: 1 }
+        task_id: { type: string }
+        operations:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/TransactionOperation" }
+
+    TransactionResult:
+      type: object
+      required: [commit_id, files]
+      properties:
+        commit_id: { type: string }
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, version]
+            properties:
+              path: { type: string }
+              version: { type: string }
+
+    TransactionConflictError:
+      type: object
+      required: [error, failed_operations]
+      properties:
+        error: { type: string, const: transaction_invalid }
+        failed_operations:
+          type: array
+          items:
+            type: object
+            required: [path, reason_code]
+            properties:
+              path: { type: string }
+              reason_code: { type: string, description: "z.B. version_conflict, no_match, ambiguous_match, acl_denied" }
+              current_content: { type: string, nullable: true, description: "nur Text-Kinds" }
+              current_version: { type: string }
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error: { type: string, description: "Maschinenlesbarer Code, z.B. unauthorized, acl_denied, not_found, no_match, ambiguous_match" }
+        message: { type: string }
+        details: { type: object }
+
+    ConflictError:
+      type: object
+      required: [error, current_version]
+      properties:
+        error: { type: string, const: version_conflict }
+        message: { type: string }
+        current_content: { type: string, nullable: true, description: "null bei kind=binary" }
+        current_version: { type: string }
+
+    # --- Client-Registry (spec.md §10, Design-Doc §14/§15) ---
+
+    ClientType:
+      type: string
+      enum: [bff, orchestrator, autonomous-agent]
+
+    SigningKey:
+      type: object
+      required: [kid, public_key, algorithm, active]
+      properties:
+        kid: { type: string }
+        public_key: { type: string }
+        algorithm: { type: string, const: EdDSA }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    SigningKeyCreate:
+      type: object
+      required: [kid, public_key]
+      properties:
+        kid: { type: string }
+        public_key: { type: string }
+        algorithm: { type: string, const: EdDSA, default: EdDSA }
+
+    ClientRegistryEntryPublic:
+      type: object
+      required: [client_id, type, issues_user_tokens, revoked, created_at]
+      description: Öffentliche Sicht — enthält NIE api_key_hash oder private Schlüssel (es werden ohnehin nur Public Keys gespeichert).
+      properties:
+        client_id: { type: string }
+        type: { $ref: "#/components/schemas/ClientType" }
+        issues_user_tokens: { type: boolean }
+        signing_keys:
+          type: array
+          items: { $ref: "#/components/schemas/SigningKey" }
+        fixed_user_id: { type: string, nullable: true, description: "nur bei type=autonomous-agent gesetzt" }
+        revoked: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    ClientRegistryEntryCreate:
+      type: object
+      required: [client_id, type]
+      properties:
+        client_id: { type: string }
+        type: { $ref: "#/components/schemas/ClientType" }
+        issues_user_tokens: { type: boolean, default: false }
+        fixed_user_id: { type: string, description: "Pflicht bei type=autonomous-agent, sonst unzulässig" }
+
+    ClientRegistryEntryUpdate:
+      type: object
+      properties:
+        issues_user_tokens: { type: boolean }
+
+    ApiKeyIssued:
+      type: object
+      required: [client_id, api_key]
+      properties:
+        client_id: { type: string }
+        api_key: { type: string, description: "Klartext — wird nur hier einmalig zurückgegeben" }
+
+    ClientRegistryEntryCreated:
+      allOf:
+        - { $ref: "#/components/schemas/ClientRegistryEntryPublic" }
+        - type: object
+          required: [api_key]
+          properties:
+            api_key: { type: string, description: "Klartext — wird nur hier einmalig zurückgegeben" }
+
+    # --- Audit-Log (spec.md §9) ---
+
+    AuditOperation:
+      type: string
+      enum: [tree, read, read_content, edit, append, write, delete, transaction]
+
+    AuditResult:
+      type: string
+      enum: [success, denied, error]
+
+    AuditLogEntry:
+      type: object
+      required: [id, timestamp, user_id, client_id, operation, pii_accessed, result]
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        user_id: { type: string }
+        client_id: { type: string }
+        operation: { $ref: "#/components/schemas/AuditOperation" }
+        path:
+          description: Einzelner Pfad, oder Liste bei operation=transaction.
+          oneOf:
+            - { type: string }
+            - { type: array, items: { type: string } }
+        kind: { $ref: "#/components/schemas/Kind" }
+        pii_accessed: { type: boolean, description: "true, wenn mind. eine kind=pii.json-Datei betroffen war" }
+        commit_id: { type: string, nullable: true, description: "nur bei erfolgreichen Writes" }
+        reason: { type: string, nullable: true, description: "nur bei Writes" }
+        result: { $ref: "#/components/schemas/AuditResult" }
+        task_id: { type: string, nullable: true }
+
+    AuditLogResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/AuditLogEntry" }
+        next_cursor: { type: string }
+
+  responses:
+    Unauthorized:
+      description: "Client-API-Key fehlt/ungültig, oder User-Token fehlt/ungültig/abgelaufen wo nötig"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: "ACL verweigert (spec.md §8) oder Admin-Endpunkt ohne Admin-user_id"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Pfad/Ressource nicht gefunden, oder ACL blendet aus (Sichtbarkeit wie „nicht gefunden")
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: "Ungültige Anfrage (z.B. old_str 0 oder >1 Treffer, Pflichtfeld fehlt)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    VersionConflict:
+      description: "if_version stimmt nicht mehr mit dem aktuellen Stand überein (spec.md §11)"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ConflictError" }

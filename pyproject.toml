@@ -1,0 +1,34 @@
+[project]
+name = "agent-md-api"
+version = "0.1.0"
+description = "Generischer API-Layer für Agenten (Mensch und KI) auf Bäume aus Markdown-/JSON-/PII-JSON-/Binärdateien."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "GitPython>=3.1",
+    "PyJWT[crypto]>=2.9",
+    "cryptography>=42",
+    "python-multipart>=0.0.9",
+    "filelock>=3.15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+*.db
+*.jsonl
+clients.json
+webdav-users.json
+instance.lock
+*.pem
+.env
