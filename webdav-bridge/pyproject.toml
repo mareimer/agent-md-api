@@ -20,6 +20,9 @@ dev = [
     "GitPython>=3.1",
     "uvicorn>=0.30",
 ]
+
+[project.scripts]
+webdav-bridge-cli = "webdav_bridge.cli:main"
 # Tests also import `agent_md_api` directly to run the Agent-API core in-process
 # alongside the bridge. Install the sibling package too before running tests:
 #   pip install -e ".[dev]" -e ..

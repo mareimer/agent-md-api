@@ -16,6 +16,7 @@ from agent_md_api.domain.errors import AgentApiError
 from agent_md_api.domain.models import ClientType
 
 from .auth.client_registry import ClientRegistry
+from .auth.tokens import generate_keypair_pem
 
 
 def _registry_path(args: argparse.Namespace) -> Path:
@@ -65,6 +66,47 @@ def _cmd_rotate_key(args: argparse.Namespace) -> None:
     print(f"Neuer API-Key für '{args.client_id}' (nur jetzt sichtbar):\n{api_key}")
 
 
+def _cmd_generate_signing_key(args: argparse.Namespace) -> None:
+    """Erzeugt ein Ed25519-Keypair, schreibt den privaten Schlüssel in eine Datei und
+    registriert den öffentlichen Schlüssel direkt bei der Agent-API (spec.md §10b)."""
+    private_key_path = Path(args.private_key_out)
+    if private_key_path.exists() and not args.force:
+        print(
+            f"Fehler: '{private_key_path}' existiert bereits. Mit --force überschreiben.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    registry = ClientRegistry(_registry_path(args))
+    private_pem, public_pem = generate_keypair_pem()
+    key = registry.add_signing_key(args.client_id, kid=args.kid, public_key=public_pem)
+
+    private_key_path.parent.mkdir(parents=True, exist_ok=True)
+    private_key_path.write_text(private_pem, encoding="utf-8")
+    try:
+        private_key_path.chmod(0o600)
+    except NotImplementedError:
+        pass  # z.B. auf manchen Windows-Dateisystemen nicht unterstützt
+
+    print(f"Signing-Key '{key.kid}' für Client '{args.client_id}' registriert.")
+    print(f"Privater Schlüssel geschrieben nach: {private_key_path}")
+
+
+def _cmd_add_signing_key(args: argparse.Namespace) -> None:
+    """Registriert einen bereits vorhandenen öffentlichen Schlüssel (z.B. von einem Client,
+    der sein Keypair selbst erzeugt hat, statt über generate-signing-key)."""
+    public_key_pem = Path(args.public_key_file).read_text(encoding="utf-8")
+    registry = ClientRegistry(_registry_path(args))
+    key = registry.add_signing_key(args.client_id, kid=args.kid, public_key=public_key_pem)
+    print(f"Signing-Key '{key.kid}' für Client '{args.client_id}' registriert.")
+
+
+def _cmd_revoke_signing_key(args: argparse.Namespace) -> None:
+    registry = ClientRegistry(_registry_path(args))
+    registry.revoke_signing_key(args.client_id, args.kid)
+    print(f"Signing-Key '{args.kid}' für Client '{args.client_id}' widerrufen.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-md-api",
@@ -105,6 +147,35 @@ def build_parser() -> argparse.ArgumentParser:
     rotate = subparsers.add_parser("rotate-key", help="Neuen API-Key für einen bestehenden Client ausstellen.")
     rotate.add_argument("client_id")
     rotate.set_defaults(func=_cmd_rotate_key)
+
+    generate_key = subparsers.add_parser(
+        "generate-signing-key",
+        help="Ed25519-Keypair erzeugen, privaten Schlüssel in Datei schreiben, Public Key registrieren "
+        "(spec.md §10b — für Clients, die X-User-Token ausstellen, z.B. die WebDAV-Bridge).",
+    )
+    generate_key.add_argument("client_id")
+    generate_key.add_argument("--kid", required=True, help="Key-ID, z.B. 'bridge-key-1'.")
+    generate_key.add_argument(
+        "--private-key-out",
+        required=True,
+        help="Zielpfad für die PEM-Datei mit dem privaten Schlüssel (verlässt die Agent-API danach nie mehr).",
+    )
+    generate_key.add_argument("--force", action="store_true", help="Vorhandene Datei am Zielpfad überschreiben.")
+    generate_key.set_defaults(func=_cmd_generate_signing_key)
+
+    add_key = subparsers.add_parser(
+        "add-signing-key",
+        help="Bereits vorhandenen öffentlichen Schlüssel (PEM-Datei) bei einem Client registrieren.",
+    )
+    add_key.add_argument("client_id")
+    add_key.add_argument("--kid", required=True)
+    add_key.add_argument("--public-key-file", required=True, help="Pfad zur PEM-Datei mit dem Public Key.")
+    add_key.set_defaults(func=_cmd_add_signing_key)
+
+    revoke_key = subparsers.add_parser("revoke-signing-key", help="Signing-Key eines Clients widerrufen.")
+    revoke_key.add_argument("client_id")
+    revoke_key.add_argument("--kid", required=True)
+    revoke_key.set_defaults(func=_cmd_revoke_signing_key)
 
     return parser
 

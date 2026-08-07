@@ -70,6 +70,9 @@ class UserAccessRegistry:
             self._by_username.pop(username, None)
             self._save()
 
+    def list_usernames(self) -> list[str]:
+        return sorted(self._by_username)
+
     def verify(self, *, username: str, password: str) -> str | None:
         """Gibt die agent_api_user_id zurück, wenn Benutzername+PAT gültig sind, sonst None."""
         entry = self._by_username.get(username)

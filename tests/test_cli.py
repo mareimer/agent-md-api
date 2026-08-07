@@ -113,3 +113,123 @@ def test_missing_registry_path_exits_with_usage_error(monkeypatch: pytest.Monkey
     with pytest.raises(SystemExit) as exc_info:
         main(["create-client", "web-bff"])
     assert exc_info.value.code == 2
+
+
+# ---- Signing-Keys (spec.md §10b) --------------------------------------------------------
+
+
+def test_generate_signing_key_writes_private_key_and_registers_public_key(
+    registry_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["--registry-path", str(registry_path), "create-client", "webdav-bridge", "--issues-user-tokens"])
+    capsys.readouterr()
+
+    key_path = tmp_path / "bridge_signing_key.pem"
+    rc = main(
+        [
+            "--registry-path",
+            str(registry_path),
+            "generate-signing-key",
+            "webdav-bridge",
+            "--kid",
+            "bridge-key-1",
+            "--private-key-out",
+            str(key_path),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "bridge-key-1" in out
+
+    assert key_path.exists()
+    assert "PRIVATE KEY" in key_path.read_text(encoding="utf-8")
+
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    signing_keys = data[0]["signing_keys"]
+    assert len(signing_keys) == 1
+    assert signing_keys[0]["kid"] == "bridge-key-1"
+    assert "PUBLIC KEY" in signing_keys[0]["public_key"]
+
+
+def test_generate_signing_key_refuses_to_overwrite_existing_file_without_force(
+    registry_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["--registry-path", str(registry_path), "create-client", "webdav-bridge", "--issues-user-tokens"])
+    capsys.readouterr()
+
+    key_path = tmp_path / "bridge_signing_key.pem"
+    key_path.write_text("bereits vorhanden", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--registry-path",
+                str(registry_path),
+                "generate-signing-key",
+                "webdav-bridge",
+                "--kid",
+                "bridge-key-1",
+                "--private-key-out",
+                str(key_path),
+            ]
+        )
+    assert exc_info.value.code == 2
+    assert key_path.read_text(encoding="utf-8") == "bereits vorhanden"
+
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert data[0]["signing_keys"] == []
+
+
+def test_add_signing_key_from_existing_pem_file(
+    registry_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agent_md_api.auth.tokens import generate_keypair_pem
+
+    main(["--registry-path", str(registry_path), "create-client", "webdav-bridge", "--issues-user-tokens"])
+    capsys.readouterr()
+
+    _priv, pub = generate_keypair_pem()
+    pub_path = tmp_path / "public.pem"
+    pub_path.write_text(pub, encoding="utf-8")
+
+    rc = main(
+        [
+            "--registry-path",
+            str(registry_path),
+            "add-signing-key",
+            "webdav-bridge",
+            "--kid",
+            "bridge-key-1",
+            "--public-key-file",
+            str(pub_path),
+        ]
+    )
+    assert rc == 0
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert data[0]["signing_keys"][0]["kid"] == "bridge-key-1"
+
+
+def test_revoke_signing_key(registry_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    main(["--registry-path", str(registry_path), "create-client", "webdav-bridge", "--issues-user-tokens"])
+    capsys.readouterr()
+    main(
+        [
+            "--registry-path",
+            str(registry_path),
+            "generate-signing-key",
+            "webdav-bridge",
+            "--kid",
+            "bridge-key-1",
+            "--private-key-out",
+            str(tmp_path / "key.pem"),
+        ]
+    )
+    capsys.readouterr()
+
+    rc = main(["--registry-path", str(registry_path), "revoke-signing-key", "webdav-bridge", "--kid", "bridge-key-1"])
+    assert rc == 0
+
+    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    key = data[0]["signing_keys"][0]
+    assert key["active"] is False
+    assert key["revoked_at"] is not None
