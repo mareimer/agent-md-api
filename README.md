@@ -37,21 +37,14 @@ mkdir -p /tmp/tree && cd /tmp/tree && git init && echo "# Hello" > note.md
 git add -A && git commit -m "initial"
 ```
 
-Register a client (there is no bootstrap CLI yet — see [Known gaps](#known-gaps)):
+Register a client:
 
-```python
-from pathlib import Path
-from agent_md_api.auth.client_registry import ClientRegistry
-from agent_md_api.domain.models import ClientType
-
-registry = ClientRegistry(Path("/tmp/state/clients.json"))
-entry, api_key = registry.create_client(
-    client_id="my-agent",
-    type=ClientType.AUTONOMOUS_AGENT,
-    fixed_user_id="system:my-agent",
-)
-print(api_key)  # shown once
+```bash
+agent-md-api --registry-path /tmp/state/clients.json create-client my-agent \
+    --type autonomous-agent --fixed-user-id system:my-agent
 ```
+
+The API key is printed once — save it. See `agent-md-api --help` for `list-clients`, `revoke-client`, and `rotate-key`.
 
 Run it:
 
@@ -97,7 +90,6 @@ The full HTTP contract is in [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3
 
 Honest list, so you find out here rather than later:
 
-- **No bootstrap CLI** — the first client has to be created through the Python API (see Quick start).
 - **Binaries live in git.** Deliberate for now — content-addressable storage was considered and deferred. Large binary trees will grow the repository.
 - **WebDAV bridge:** `MOVE`/`COPY` are atomic for text files (one transaction), but not for binaries or when moving into a directory that does not exist yet. Directory `DELETE`/`MOVE` are not implemented.
 - **Audit query** is only supported by the SQLite backend; `jsonl` is for shipping to Loki/ELK/CloudWatch and expects you to query there.

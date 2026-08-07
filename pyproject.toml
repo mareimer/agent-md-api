@@ -22,6 +22,9 @@ dev = [
     "httpx>=0.27",
 ]
 
+[project.scripts]
+agent-md-api = "agent_md_api.cli:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
