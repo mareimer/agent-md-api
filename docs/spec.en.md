@@ -135,7 +135,8 @@ Reason: a client is called by multiple users, and the same user should be able t
   {"scope": "client", "client_id": "web-app", "path_prefix": "/", "read": "allow", "write": "allow"}
 ]
 ```
-- Effective rule for `(user, client, path)`: a specific **pair rule** (user+client combination) wins if one exists; otherwise the **most restrictive** decision among the user, client, and global rules (a rule with neither `user_id` nor `client_id` applies to every principal). Default with no matching rule: `allow`.
+- Effective rule for `(user, client, path)`: a specific **pair rule** (user+client combination) wins if one exists; otherwise the **most restrictive** decision among the user, client, and global rules (a rule with neither `user_id` nor `client_id` applies to every principal).
+- **Default with no matching rule: fail-closed (`deny`)** — as soon as any `_system/acl.json` exists in the tree (even with `[]` content), every combination of `user_id`/`client_id`/path/`kind` it doesn't cover is denied, not allowed. An incomplete or buggy ACL configuration must never accidentally grant access to an unknown principal. **The only exception:** if **no** `acl.json` exists yet at all (fresh tree, bootstrap), the default stays allow — otherwise not even the admin could write the very first ACL file, since that write goes through the same check (`/_system/acl.json` is additionally hard-restricted to the admin `user_id`, §10a — but on top of the normal ACL check, not instead of it).
 - A `kind` rule applies **additionally and independently of the path** (e.g. a blanket write ban for all `pii.json`, regardless of location) — combined additively with AND against the scope decision, `deny` wins. Applies equally to `pii.binary` (§3).
 - The first matching, **more specific** rule wins (path prefix before the general `/`).
 - Enforced on `GET /tree` (hiding entries) **and** on every individual read/write call.

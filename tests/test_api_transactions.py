@@ -67,10 +67,18 @@ def test_transaction_failure_leaves_all_operations_untouched(client: TestClient,
 def test_transaction_acl_checked_per_operation(client: TestClient, admin: AdminContext, admin_headers: dict[str, str]) -> None:
     """Eine Operation ist erlaubt, eine andere per ACL verboten -> die GESAMTE Transaktion
     wird abgelehnt (403), auch die für sich genommen erlaubte Operation wird nicht angewendet."""
-    acl_rules = [{"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"}]
-    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
+    # Testdatei zuerst anlegen, solange noch keine acl.json existiert (Bootstrap-Allow).
     client.post("/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers)
     gesperrt_version = client.get("/api/v1/file/gesperrt/geheim.md", headers=admin_headers).json()["version"]
+
+    # tester braucht eine explizite Allow-Regel für "erlaubter/" -- sonst würde die fail-closed
+    # ACL diese Operation ohnehin ablehnen, und der Test würde nicht mehr das Gemischte
+    # (eine Operation erlaubt, eine verboten) prüfen, das er laut Docstring prüfen soll.
+    acl_rules = [
+        {"user_id": "human:tester", "path_prefix": "erlaubter/", "write": "allow"},
+        {"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"},
+    ]
+    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
 
     tester_headers = admin.headers_for("human:tester")
     resp = client.post(

@@ -18,11 +18,25 @@ ALICE_MOBILE = Principal(user_id="human:alice", client_id="mobile-bff")
 OTHER_WEB = Principal(user_id="human:anna", client_id="web-bff")
 
 
-def test_default_allow_without_any_matching_rule() -> None:
-    engine = AclEngine([])
+def test_bootstrap_default_allow_when_no_acl_file_exists() -> None:
+    """`rules=None` simuliert den Fall ohne `_system/acl.json` im Baum (`load_acl_rules`
+    gibt dann `None` zurück, nicht `[]`) — einziger Fall mit Default-Allow, sonst könnte
+    der Admin nicht mal die allererste ACL-Datei schreiben."""
+    engine = AclEngine(None)
 
     assert engine.can_read(principal=ALICE_WEB, path="irgendwas.md", kind=Kind.MD) is True
     assert engine.can_write(principal=ALICE_WEB, path="irgendwas.md", kind=Kind.MD) is True
+
+
+def test_fail_closed_deny_without_any_matching_rule_once_acl_file_exists() -> None:
+    """Sobald eine Regelliste existiert — auch eine leere `[]` —, ist das eine bewusste
+    Konfiguration: alles, was keine Regel explizit erlaubt, wird abgelehnt. Verhindert,
+    dass eine unvollständige/fehlerhafte acl.json unbekannte Kombinationen aus
+    user_id/client_id/Pfad/Kind versehentlich freigibt."""
+    engine = AclEngine([])
+
+    assert engine.can_read(principal=ALICE_WEB, path="irgendwas.md", kind=Kind.MD) is False
+    assert engine.can_write(principal=ALICE_WEB, path="irgendwas.md", kind=Kind.MD) is False
 
 
 def test_pair_rule_wins_over_single_scope_rules() -> None:
@@ -47,8 +61,9 @@ def test_kind_rule_applies_independent_of_path_and_of_user_client() -> None:
 
     assert engine.can_write(principal=ALICE_WEB, path="irgendwo/tief/verschachtelt/person.pii.json", kind=Kind.PII_JSON) is False
     assert engine.can_write(principal=OTHER_WEB, path="anderswo/andere.pii.json", kind=Kind.PII_JSON) is False
-    # Nicht-PII-Dateien bleiben von der kind-Regel unberührt.
-    assert engine.can_write(principal=ALICE_WEB, path="irgendwo/notiz.md", kind=Kind.MD) is True
+    # Nicht-PII-Dateien sind von der kind-Regel selbst unberührt, aber es existiert auch
+    # keine Regel, die sie erlaubt -> fail-closed deny, weil eine acl.json existiert.
+    assert engine.can_write(principal=ALICE_WEB, path="irgendwo/notiz.md", kind=Kind.MD) is False
 
 
 def test_kind_gate_denies_even_when_scope_allows() -> None:
@@ -90,8 +105,8 @@ def test_rule_only_applies_to_matching_user() -> None:
     engine = AclEngine(rules)
 
     assert engine.can_read(principal=ALICE_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is False
-    # Anderer user_id, gleicher Pfad -> Regel greift nicht -> Default-Allow.
-    assert engine.can_read(principal=OTHER_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is True
+    # Anderer user_id, gleicher Pfad -> Regel greift nicht -> fail-closed deny (keine Regel erlaubt es).
+    assert engine.can_read(principal=OTHER_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is False
 
 
 def test_path_only_rule_without_user_or_client_scope_applies_to_everyone() -> None:
@@ -156,17 +171,22 @@ def test_tree_get_hides_entries_without_read_permission() -> None:
     engine = AclEngine(rules)
 
     assert engine.can_read(principal=ALICE_WEB, path="geheim/akte.md", kind=Kind.MD) is False
-    assert engine.can_read(principal=ALICE_WEB, path="oeffentlich/akte.md", kind=Kind.MD) is True
+    # Kein Regel-Treffer für "oeffentlich/akte.md" -> fail-closed deny (Regeln existieren).
+    assert engine.can_read(principal=ALICE_WEB, path="oeffentlich/akte.md", kind=Kind.MD) is False
 
 
 def test_permission_none_field_does_not_count_as_candidate() -> None:
     """Eine Regel, die nur `read` setzt (kein `write`), darf die write-Entscheidung
-    nicht beeinflussen — sonst würde eine reine Lese-Deny-Regel versehentlich auch
-    Schreibrechte einschränken."""
+    nicht beeinflussen — die Entscheidung für `write` fällt hier auf fail-closed deny
+    zurück (keine Regel setzt `write`), nicht weil `read=deny` irgendwie "durchsickert"."""
     rules = [AclRule(client_id="web-bff", path_prefix="finanzen/", read="deny")]
     engine = AclEngine(rules)
 
-    assert engine.can_write(principal=ALICE_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is True
+    assert engine.can_write(principal=ALICE_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is False
+    # Explizite write=allow-Regel für denselben Pfad bleibt unbeeinflusst vom read=deny.
+    rules_with_explicit_write = rules + [AclRule(client_id="web-bff", path_prefix="finanzen/", write="allow")]
+    engine_with_explicit_write = AclEngine(rules_with_explicit_write)
+    assert engine_with_explicit_write.can_write(principal=ALICE_WEB, path="finanzen/uebersicht.md", kind=Kind.MD) is True
 
 
 def test_permission_enum_values() -> None:
@@ -197,8 +217,8 @@ def test_single_star_does_not_cross_directory_boundary() -> None:
     engine = AclEngine(rules)
 
     assert engine.can_write(principal=ALICE_WEB, path="kontakte/anna.pii.json", kind=Kind.PII_JSON) is False
-    # Eine Ebene tiefer -- ein einzelnes `*` matcht kein `/`, Regel greift nicht -> Default-Allow.
-    assert engine.can_write(principal=ALICE_WEB, path="kontakte/archiv/anna.pii.json", kind=Kind.PII_JSON) is True
+    # Eine Ebene tiefer -- ein einzelnes `*` matcht kein `/`, Regel greift nicht -> fail-closed deny.
+    assert engine.can_write(principal=ALICE_WEB, path="kontakte/archiv/anna.pii.json", kind=Kind.PII_JSON) is False
 
 
 def test_double_star_crosses_directory_boundaries() -> None:
@@ -216,7 +236,8 @@ def test_glob_is_a_full_match_not_a_prefix_match() -> None:
     engine = AclEngine(rules)
 
     assert engine.can_write(principal=ALICE_WEB, path="mietvertrag.md", kind=Kind.MD) is False
-    assert engine.can_write(principal=ALICE_WEB, path="mietvertrag.md.bak", kind=Kind.BINARY) is True
+    # Kein Regel-Treffer für "mietvertrag.md.bak" (Full-Match, kein Präfix-Match) -> fail-closed deny.
+    assert engine.can_write(principal=ALICE_WEB, path="mietvertrag.md.bak", kind=Kind.BINARY) is False
 
 
 def test_more_literal_characters_win_between_two_matching_globs() -> None:

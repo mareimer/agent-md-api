@@ -119,6 +119,14 @@ def test_409_version_conflict_includes_current_content(client: TestClient, admin
 
 
 def test_403_acl_denied_write(client: TestClient, admin: AdminContext, admin_headers: dict[str, str]) -> None:
+    # Datei zuerst anlegen, solange noch keine acl.json existiert (Bootstrap-Allow) -- sonst
+    # würde admin durch die gleich gesetzte, fail-closed ACL selbst ausgesperrt.
+    create = client.post(
+        "/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers
+    )
+    assert create.status_code == 200, create.text
+    version = create.json()["version"]
+
     acl_rules = [{"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"}]
     write_acl = client.post(
         "/api/v1/file/_system/acl.json",
@@ -128,12 +136,6 @@ def test_403_acl_denied_write(client: TestClient, admin: AdminContext, admin_hea
     assert write_acl.status_code == 200, write_acl.text
 
     tester_headers = admin.headers_for("human:tester")
-    # Datei muss erst existieren, damit "edit" (statt 404) den ACL-Pfad überhaupt erreicht.
-    create = client.post(
-        "/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers
-    )
-    assert create.status_code == 200, create.text
-    version = create.json()["version"]
 
     resp = client.post(
         "/api/v1/file/gesperrt/geheim.md/edit",
@@ -146,13 +148,15 @@ def test_403_acl_denied_write(client: TestClient, admin: AdminContext, admin_hea
 
 
 def test_read_allowed_but_write_denied_by_acl(client: TestClient, admin: AdminContext, admin_headers: dict[str, str]) -> None:
+    # Datei zuerst anlegen, solange noch keine acl.json existiert (Bootstrap-Allow).
+    client.post("/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers)
+
     acl_rules = [{"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"}]
     client.post(
         "/api/v1/file/_system/acl.json",
         json={"content": json.dumps(acl_rules), "reason": "ACL Setup"},
         headers=admin_headers,
     )
-    client.post("/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers)
 
     tester_headers = admin.headers_for("human:tester")
     read_resp = client.get("/api/v1/file/gesperrt/geheim.md", headers=tester_headers)
@@ -246,9 +250,14 @@ def test_acl_json_delete_also_admin_only(client: TestClient, admin: AdminContext
 def test_tree_hides_entries_without_read_permission(
     client: TestClient, admin: AdminContext, admin_headers: dict[str, str]
 ) -> None:
-    acl_rules = [{"user_id": "human:tester", "path_prefix": "geheim/", "read": "deny"}]
-    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
+    # Testdatei zuerst anlegen, solange noch keine acl.json existiert (Bootstrap-Allow) --
+    # sonst würde admin durch die gleich gesetzte, fail-closed ACL selbst ausgesperrt.
     client.post("/api/v1/file/geheim/akte.md", json={"content": "top secret", "reason": "Setup"}, headers=admin_headers)
+    acl_rules = [
+        {"user_id": "human:tester", "path_prefix": "/", "read": "allow"},
+        {"user_id": "human:tester", "path_prefix": "geheim/", "read": "deny"},
+    ]
+    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
 
     tester_headers = admin.headers_for("human:tester")
     resp = client.get("/api/v1/tree", params={"depth": 3}, headers=tester_headers)

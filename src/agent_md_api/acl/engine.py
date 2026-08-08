@@ -33,8 +33,14 @@ Zeichenzahl statt reiner String-Länge).
    vom Pfad" (spec.md §8). Die spezifischste zutreffende Kind-Regel liefert
    ihre eigene Entscheidung, additiv zur Scope-Entscheidung.
 3. **Kombination:** `deny`, wenn Scope-Entscheidung ODER Kind-Gate „deny"
-   sagt. Sagt keines der beiden etwas (kein Treffer), **Default: allow**
-   (spec.md §8).
+   sagt. Sagt keines der beiden etwas (kein Treffer), **Default: fail-closed
+   (deny)** — außer im Bootstrap-Fall ganz ohne `_system/acl.json` im Baum,
+   siehe `AclEngine`/`load_acl_rules`. Frühere Fassung (bis inkl. spec.md
+   Version 0.3) hatte hier unbedingt Default-Allow; das erlaubte einer
+   unvollständigen oder fehlerhaften ACL-Konfiguration, unbekannte
+   user_id/client_id/Pfad/Kind-Kombinationen versehentlich freizugeben —
+   bewusst auf fail-closed umgestellt, sobald überhaupt eine `acl.json`
+   existiert.
 
 Beispiel aus der Spec (§8), das dieses Modell korrekt abbildet: eine
 Blanket-Regel `client=web-bff, path=/, allow/allow` (Scope-Entscheidung:
@@ -56,13 +62,18 @@ ACL_PATH = "_system/acl.json"
 durchgesetzt an der API-Schicht (api/files.py), nicht hier in der reinen Auswertungslogik."""
 
 
-def load_acl_rules(storage) -> list[AclRule]:  # noqa: ANN001 - vermeidet Zirkelimport auf GitStorage
-    """Fehlt die Datei (frischer Baum, noch keine ACL gepflegt): leere Regelliste
-    -> Default-Allow für alles (spec.md §8), bewusstes Bootstrap-Verhalten."""
+def load_acl_rules(storage) -> list[AclRule] | None:  # noqa: ANN001 - vermeidet Zirkelimport auf GitStorage
+    """Fehlt die Datei (frischer Baum, noch keine ACL gepflegt): `None` statt einer leeren
+    Liste — `AclEngine` behandelt das als Bootstrap-Fall mit Default-Allow (siehe dort).
+    Das ist der einzige Fall, der noch Default-Allow bekommt: sonst könnte der Admin nicht
+    einmal die allererste `acl.json` schreiben, weil auch dieser Schreibzugriff durch die
+    normale ACL-Prüfung läuft (`api/files.py::_require_write`) — ein garantiertes
+    Aussperren ohne diese Ausnahme. Existiert die Datei (auch mit `[]`-Inhalt oder mit
+    Lücken), ist das ab hier eine bewusste Konfiguration -> Default-Deny (s.u.)."""
     try:
         file = storage.get_file(ACL_PATH)
     except NotFoundError:
-        return []
+        return None
     return [AclRule.model_validate(r) for r in json.loads(file.content or "[]")]
 
 
@@ -124,8 +135,16 @@ def _most_specific(rules: list[AclRule]) -> AclRule | None:
 
 
 class AclEngine:
-    def __init__(self, rules: list[AclRule]) -> None:
-        self._rules = rules
+    """`rules=None` (kein `_system/acl.json` im Baum) ist der einzige Bootstrap-Fall mit
+    Default-Allow (siehe `load_acl_rules`). Sobald eine Regelliste übergeben wird — auch
+    `[]` — ist das eine bewusste Konfiguration: alles, was keine Regel explizit erlaubt,
+    wird abgelehnt (fail-closed). Ein Tippfehler oder eine Lücke in `acl.json` darf nicht
+    dazu führen, dass unbekannte Kombinationen aus user_id/client_id/path/kind automatisch
+    Zugriff bekommen."""
+
+    def __init__(self, rules: list[AclRule] | None) -> None:
+        self._bootstrap_allow = rules is None
+        self._rules = rules if rules is not None else []
 
     def _scope_decision(self, *, principal: Principal, path: str, kind: Kind, field: str) -> Permission | None:
         matching = [r for r in self._rules if getattr(r, field) is not None and _matches(r, principal=principal, path=path, kind=kind)]
@@ -164,7 +183,9 @@ class AclEngine:
             return Permission.DENY
         if scope is Permission.ALLOW or gate is Permission.ALLOW:
             return Permission.ALLOW
-        return Permission.ALLOW  # Default ohne jede passende Regel (spec.md §8)
+        # Keine Regel passt: Default-Allow nur im Bootstrap-Fall (keine acl.json im Baum),
+        # sonst fail-closed. Siehe Klassendocstring/`load_acl_rules`.
+        return Permission.ALLOW if self._bootstrap_allow else Permission.DENY
 
     def can_read(self, *, principal: Principal, path: str, kind: Kind) -> bool:
         return self._effective(principal=principal, path=path, kind=kind, field="read") is Permission.ALLOW

@@ -124,10 +124,12 @@ def test_tree_read_creates_audit_entry(client: TestClient, admin_headers: dict[s
 def test_acl_denied_request_logged_with_result_denied(
     client: TestClient, admin: AdminContext, admin_headers: dict[str, str]
 ) -> None:
-    acl_rules = [{"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"}]
-    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
+    # Testdatei zuerst anlegen, solange noch keine acl.json existiert (Bootstrap-Allow).
     client.post("/api/v1/file/gesperrt/geheim.md", json={"content": "geheim", "reason": "Setup"}, headers=admin_headers)
     version = client.get("/api/v1/file/gesperrt/geheim.md", headers=admin_headers).json()["version"]
+
+    acl_rules = [{"user_id": "human:tester", "path_prefix": "gesperrt/", "read": "allow", "write": "deny"}]
+    client.post("/api/v1/file/_system/acl.json", json={"content": json.dumps(acl_rules), "reason": "ACL"}, headers=admin_headers)
 
     tester_headers = admin.headers_for("human:tester")
     resp = client.post(
