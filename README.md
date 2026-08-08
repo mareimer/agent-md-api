@@ -25,6 +25,7 @@ Hand agents a shared filesystem and you get a race condition without an error me
 - **Audit that includes reads.** Every call is logged, not just the writes — with a `pii_accessed` flag whenever a PII-classified file is touched. "Who saw which personal data, and when" is a query, not an investigation.
 - **Git as the history.** Each transaction becomes one commit with a mandatory `reason`, plus the acting user, client and task. `git log` is the audit trail for content.
 - **A WebDAV bridge for humans.** Mount the same tree as a network drive and edit files in Explorer or Finder. Same permissions, same audit, same concurrency rules — humans are just another client, not an exception.
+- **Metadata for binaries via a naming convention, not a special case.** Want structured metadata next to an image or other binary (e.g. `photo.jpg`)? Write it to `photo.jpg.meta.json` — an ordinary `kind: json` file, versioned and access-controlled like any other. No dedicated `kind`, no schema baked into the API: what fields belong in that JSON is entirely up to your application.
 
 ## Quick start
 
@@ -91,6 +92,7 @@ The full HTTP contract is in [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3
 Honest list, so you find out here rather than later:
 
 - **Binaries live in git.** Deliberate for now — content-addressable storage was considered and deferred. Large binary trees will grow the repository.
+- **PII detection only covers `pii.json` today.** A binary file can't yet be flagged as PII the same way (imagine a photo showing identifiable people) — `kind` recognizes `pii.json` but not, say, `foto.pii.jpg`. A generic rule (any filename containing `.pii.` gets the PII treatment, regardless of extension) is designed but not implemented — see `docs/spec.md` §3/§7.1/§8.
 - **WebDAV bridge:** `MOVE`/`COPY` are atomic for text files (one transaction), but not for binaries or when moving into a directory that does not exist yet. Directory `DELETE`/`MOVE` are not implemented.
 - **Audit query** is only supported by the SQLite backend; `jsonl` is for shipping to Loki/ELK/CloudWatch and expects you to query there.
 - **Documentation is partly in German.** The specification (`docs/spec.md`) and the source comments are German; the API contract and this README are English.

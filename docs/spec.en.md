@@ -30,9 +30,15 @@ autonomous agents                      └────────────�
 
 ## 3. Data model
 
-- `kind`: `dir` | `md` | `json` | `pii.json` | `binary`
-- Version token per file: hash/timestamp for text kinds, hash of the bytes for `binary`
+- `kind`: `dir` | `md` | `json` | `pii.json` | `binary` | `pii.binary`
+- Version token per file: hash/timestamp for text kinds, hash of the bytes for `binary`/`pii.binary`
 - Storage backend: git working tree. Every transaction produces exactly one commit (audit, §9)
+
+**Generic filename-based PII detection, not hardcoded per kind:** `pii.json` used to be the only special case (`path.endswith(".pii.json")`, `storage/git_repo.py::classify_kind`). Generalized into one rule: **any filename containing the `.pii.` infix** is PII-classified, regardless of the actual extension. `report.pii.json` → `pii.json` (unchanged), `photo.pii.jpg` → `pii.binary` (new), anything else without the `.pii.` infix → `json`/`md`/`binary` as before. Reason: unlike JSON fields, image content can't be split field-by-field into PII/non-PII — a photo showing identifiable people is PII as a *whole file*, so that has to show up at the file's `kind` itself, not only in a sidecar (§7.1). Side effect: a sidecar belonging to the original, e.g. `photo.pii.jpg.json`, matches automatically too — consistently restrictive, no special case needed.
+
+Kind gate (§8) and the PII audit flag (§9.2) apply to `pii.binary` exactly as they do to `pii.json` — every place currently checking `kind is PII_JSON` needs `kind in {PII_JSON, PII_BINARY}` (`api/files.py`, `api/tree.py`, `api/transactions.py`).
+
+> **Status: specified, not yet implemented.** Implementation (kind enum, `classify_kind`, every `PII_JSON` comparison site, tests) is an open next step.
 
 ## 4. Read path
 
@@ -104,6 +110,15 @@ Binary files stay **in git for now**, despite known downsides (repo growth, no m
 
 **Later option** (if repo growth becomes too large, e.g. an images folder): local CAS with hash-sharded directories + a manifest file per path in git, no third party needed.
 
+### 7.1 Metadata for binary files (e.g. images) — sidecar convention, no new `kind`
+
+No dedicated `kind` and no special field is introduced in the agent API for metadata on binary files — that would pull domain logic (what counts as "useful" image metadata) into this domain-agnostic repo (§2). Instead: a plain naming convention on top of the existing data model.
+
+- Next to `<path>/<file>.<ext>` (`kind: binary`) an optional `<path>/<file>.<ext>.meta.json` (`kind: json`) can live in the same directory — an ordinary, independently versioned/ACL-protected JSON file, no API special case.
+- `GET /tree` lists both entries side by side; an agent reads/writes the meta JSON through the normal `GET|POST /file/{path}` endpoints.
+- The **schema** of the meta JSON is defined and owned by the consumer, not this repo.
+- **PII on binary files** (e.g. a photo showing identifiable people): not a field in the sidecar, but on the **original file's name** itself (`.pii.` infix, e.g. `photo.pii.jpg`) — see §3 for the generic detection rule and why this has to be kind-scoped rather than field-scoped for image content.
+
 ## 8. Access rights — two-axis identity × path × kind
 
 Two independent identities per request:
@@ -121,7 +136,7 @@ Reason: a client is called by multiple users, and the same user should be able t
 ]
 ```
 - Effective rule for `(user, client, path)`: a specific **pair rule** (user+client combination) wins if one exists; otherwise the **most restrictive** decision among the user, client, and global rules (a rule with neither `user_id` nor `client_id` applies to every principal). Default with no matching rule: `allow`.
-- A `kind` rule applies **additionally and independently of the path** (e.g. a blanket write ban for all `pii.json`, regardless of location) — combined additively with AND against the scope decision, `deny` wins.
+- A `kind` rule applies **additionally and independently of the path** (e.g. a blanket write ban for all `pii.json`, regardless of location) — combined additively with AND against the scope decision, `deny` wins. Applies equally to `pii.binary` (§3).
 - The first matching, **more specific** rule wins (path prefix before the general `/`).
 - Enforced on `GET /tree` (hiding entries) **and** on every individual read/write call.
 
@@ -240,6 +255,8 @@ Token renewal is up to the respective client (session/refresh handling is outsid
 - Audit log as a configurable port (§9.3): `none|sqlite|jsonl|loki|elk|azure|aws`, built: `none`+`sqlite`+`jsonl` (the latter covers Loki/ELK/Azure/AWS via external standard shippers). Native SDK push adapters for Loki/ELK/Azure/AWS not planned for now.
 - WebDAV bridge (§14): complete design (architecture, auth translation, protocol mapping, proposed tech stack `wsgidav`). Stays in this repo (generic, no domain coupling).
 - Glob patterns in `path_prefix` (§8): `*`/`**` supported, allows e.g. locking a document across all `kind` variants and then selectively reopening individual kinds. Field name deliberately unchanged (no schema break) — patterns without `*` remain plain literal prefixes.
+- Metadata for binary files (§7.1): sidecar convention (`<file>.<ext>.meta.json`), no new `kind`, no schema knowledge in this repo.
+- `pii.binary` kind + generic `.pii.` infix detection (§3/§7.1/§8): specified, **not yet implemented** — `classify_kind`, the `Kind` enum, and every `PII_JSON` comparison site still need updating.
 
 ## 13. Backlog (non-binding)
 

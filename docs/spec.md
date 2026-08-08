@@ -30,9 +30,15 @@ autonome Agenten                       └────────────�
 
 ## 3. Datenmodell
 
-- `kind`: `dir` | `md` | `json` | `pii.json` | `binary`
-- Versions-Token je Datei: bei Text-Kinds Hash/Timestamp, bei `binary` der Hash der Bytes
+- `kind`: `dir` | `md` | `json` | `pii.json` | `binary` | `pii.binary`
+- Versions-Token je Datei: bei Text-Kinds Hash/Timestamp, bei `binary`/`pii.binary` der Hash der Bytes
 - Storage-Backend: Git-Arbeitsbaum. Jede Transaktion erzeugt genau einen Commit (Audit, §9)
+
+**PII-Erkennung generisch am Dateinamen, nicht kind-spezifisch hartkodiert:** `pii.json` war bisher der einzige Sonderfall (`path.endswith(".pii.json")`, `storage/git_repo.py::classify_kind`). Generalisiert auf eine einheitliche Regel: **jeder Dateiname, der das Infix `.pii.` enthält**, gilt als PII-klassifiziert — unabhängig von der eigentlichen Endung. `bericht.pii.json` → `pii.json` (wie bisher), `foto.pii.jpg` → `pii.binary` (neu), alles andere ohne `.pii.`-Infix → `json`/`md`/`binary` wie bisher. Grund: Bildinhalte lassen sich nicht feldscharf in PII/Nicht-PII trennen wie JSON-Felder — bei einem Foto mit erkennbaren Personen ist die *ganze Datei* PII, das muss sich also am `kind` der Datei selbst zeigen, nicht erst in einem Sidecar (§7.1). Nebeneffekt: ein zur Originaldatei gehöriges Sidecar wie `foto.pii.jpg.json` matcht automatisch mit — konsistent restriktiv, kein Sonderfall nötig.
+
+Kind-Gate (§8) und PII-Audit-Flag (§9.2) gelten für `pii.binary` genau wie für `pii.json` — überall, wo aktuell `kind is PII_JSON` geprüft wird, gilt künftig `kind in {PII_JSON, PII_BINARY}` (`api/files.py`, `api/tree.py`, `api/transactions.py`).
+
+> **Status: spezifiziert, noch nicht implementiert.** Umsetzung (Kind-Enum, `classify_kind`, alle `PII_JSON`-Vergleichsstellen, Tests) ist offener nächster Schritt.
 
 ## 4. Read-Pfad
 
@@ -104,6 +110,15 @@ Binärdateien bleiben **vorerst direkt in git**, trotz bekannter Nachteile (Repo
 
 **Spätere Option** (bei zu großem Repo-Wachstum, z.B. Bilderordner): lokales CAS mit Hash-Sharding-Verzeichnissen + Manifest-Datei je Pfad in git, kein Drittanbieter nötig.
 
+### 7.1 Metadaten zu Binärdateien (z.B. Bildern) — Sidecar-Konvention, kein neuer `kind`
+
+Für Metadaten zu Binärdateien wird **kein** eigener `kind` und **kein** Sonderfeld in der Agent-API eingeführt — das würde Fachlogik (was ist ein "sinnvolles" Bild-Metadatum) in dieses domänenunabhängige Repo ziehen (§2). Stattdessen: reine Namenskonvention auf bestehendem Datenmodell.
+
+- Zu `<pfad>/<datei>.<ext>` (`kind: binary`) liegt optional `<pfad>/<datei>.<ext>.meta.json` (`kind: json`) im selben Verzeichnis — eine ganz normale, unabhängig versionierte/ACL-geschützte JSON-Datei, kein API-Sonderfall.
+- `GET /tree` listet beide Einträge nebeneinander; ein Agent liest/schreibt das Meta-JSON über die normalen `GET|POST /file/{path}`-Endpunkte.
+- Das **Schema** des Meta-JSON definiert und pflegt der Konsument, nicht dieses Repo.
+- **PII bei Binärdateien** (z.B. Foto mit erkennbaren Personen): nicht als Feld im Sidecar, sondern am **Dateinamen der Originaldatei** selbst (`.pii.`-Infix, z.B. `foto.pii.jpg`) — siehe §3 für die generische Erkennungsregel und die Begründung, warum das bei Bildinhalten kind-scharf statt feldscharf sein muss.
+
 ## 8. Zugriffsrechte — Zwei-Achsen-Identität × Pfad × Kind
 
 Zwei unabhängige Identitäten je Request:
@@ -121,7 +136,7 @@ Grund: ein Client wird von mehreren Nutzern aufgerufen, und derselbe Nutzer soll
 ]
 ```
 - Effektive Regel für `(user, client, path)`: eine spezifische **Paar-Regel** (User+Client-Kombination) gewinnt, falls vorhanden; sonst die **restriktivste** Entscheidung aus User-, Client- und Global-Regeln (eine Regel ohne `user_id` *und* ohne `client_id` gilt für jeden Principal). Default ohne passende Regel: `allow`.
-- `kind`-Regel greift **zusätzlich und unabhängig vom Pfad** (z.B. generelles Schreibverbot für alle `pii.json`, unabhängig vom Ort) — additiv UND-verknüpft mit der Scope-Entscheidung, `deny` gewinnt.
+- `kind`-Regel greift **zusätzlich und unabhängig vom Pfad** (z.B. generelles Schreibverbot für alle `pii.json`, unabhängig vom Ort) — additiv UND-verknüpft mit der Scope-Entscheidung, `deny` gewinnt. Gilt gleichermaßen für `pii.binary` (§3).
 - Erste zutreffende, **spezifischere** Regel gewinnt (Pfad-Präfix vor allgemeinem `/`).
 - Durchgesetzt bei `GET /tree` (Einträge ausblenden) **und** bei jedem einzelnen Read/Write-Call.
 
@@ -240,6 +255,8 @@ Token-Erneuerung ist Sache des jeweiligen Clients (Session-/Refresh-Handling au�
 - Audit-Log als konfigurierbarer Port (§9.3): `none|sqlite|jsonl|loki|elk|azure|aws`, gebaut: `none`+`sqlite`+`jsonl` (Letzteres deckt Loki/ELK/Azure/AWS über externe Standard-Shipper ab). Native SDK-Push-Adapter für Loki/ELK/Azure/AWS vorerst nicht geplant.
 - WebDAV-Bridge (§14): vollständiges Design (Architektur, Auth-Übersetzung, Protokoll-Mapping, Tech-Stack-Vorschlag `wsgidav`). Bleibt in diesem Repo (generisch, keine Domänenkopplung).
 - Glob-Muster in `path_prefix` (§8): `*`/`**` unterstützt, erlaubt z.B. ein Dokument über alle `kind`-Varianten hinweg zu sperren und einzelne Kinds gezielt wieder zu öffnen. Feldname bewusst unverändert (kein Schema-Bruch) — Muster ohne `*` bleiben reine Literal-Präfixe.
+- Metadaten zu Binärdateien (§7.1): Sidecar-Konvention (`<datei>.<ext>.meta.json`), kein neuer `kind`, kein Schema-Wissen in diesem Repo.
+- `pii.binary`-Kind + generische `.pii.`-Infix-Erkennung (§3/§7.1/§8): spezifiziert, **noch nicht implementiert** — `classify_kind`, `Kind`-Enum, alle `PII_JSON`-Vergleichsstellen müssen nachgezogen werden.
 
 ## 13. Backlog (unverbindlich)
 
