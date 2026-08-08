@@ -84,6 +84,44 @@ def test_registry_persists_across_reload(registry_path: Path) -> None:
     assert verified.client_id == "web-bff"
 
 
+def test_already_running_registry_sees_client_created_by_separate_instance(registry_path: Path) -> None:
+    """Regression: die Bootstrap-CLI läuft als eigener Prozess neben dem schon laufenden
+    Uvicorn-Worker und schreibt in dieselbe Datei. Ohne Reload-on-Access (spec.md §10a,
+    Docstring von `ClientRegistry`) würde ein per CLI angelegter Client erst nach einem
+    Neustart des Servers auffindbar — genau das darf hier nicht mehr passieren."""
+    server_registry = ClientRegistry(registry_path)  # simuliert die schon laufende App
+    cli_registry = ClientRegistry(registry_path)  # simuliert einen separaten CLI-Aufruf
+
+    _entry, raw_key = cli_registry.create_client(client_id="webdav-bridge", type=ClientType.BFF)
+
+    verified = server_registry.verify_api_key(raw_key)
+    assert verified.client_id == "webdav-bridge"
+
+
+def test_already_running_registry_sees_signing_key_added_by_separate_instance(registry_path: Path) -> None:
+    server_registry = ClientRegistry(registry_path)
+    cli_registry = ClientRegistry(registry_path)
+    cli_registry.create_client(client_id="webdav-bridge", type=ClientType.BFF, issues_user_tokens=True)
+
+    _priv, pub = generate_keypair_pem()
+    cli_registry.add_signing_key("webdav-bridge", kid="bridge-key-1", public_key=pub)
+
+    key = server_registry.active_signing_key("webdav-bridge", "bridge-key-1")
+    assert key is not None
+    assert key.public_key == pub
+
+
+def test_already_running_registry_sees_revocation_by_separate_instance(registry_path: Path) -> None:
+    server_registry = ClientRegistry(registry_path)
+    cli_registry = ClientRegistry(registry_path)
+    _entry, raw_key = cli_registry.create_client(client_id="webdav-bridge", type=ClientType.BFF)
+
+    cli_registry.revoke_client("webdav-bridge")
+
+    with pytest.raises(UnauthorizedError):
+        server_registry.verify_api_key(raw_key)
+
+
 # ---- User-Token minten/verifizieren (spec.md §10b) ---------------------------------------
 
 

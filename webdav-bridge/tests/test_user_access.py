@@ -108,3 +108,41 @@ def test_multiple_users_independent(tmp_path: Path) -> None:
     assert registry.verify(username="anna", password=anna_pat) == "human:anna"
     # PATs sind nicht gegeneinander austauschbar
     assert registry.verify(username="marko", password=anna_pat) is None
+
+
+def test_already_running_registry_sees_user_created_by_separate_instance(tmp_path: Path) -> None:
+    """Regression: die webdav-bridge-cli läuft als eigener Prozess neben dem schon
+    laufenden Bridge-Server und schreibt in dieselbe Datei. Ohne Reload-on-Access
+    (spec.md §14.2, Docstring von `UserAccessRegistry`) würde ein per CLI angelegter
+    Benutzer erst nach einem Neustart des Servers erkannt — genau das darf hier nicht
+    mehr passieren."""
+    path = tmp_path / "users.json"
+    server_registry = UserAccessRegistry(path)  # simuliert die schon laufende Bridge
+    cli_registry = UserAccessRegistry(path)  # simuliert einen separaten CLI-Aufruf
+
+    raw_pat = cli_registry.create_user(username="marko", agent_api_user_id="human:marko")
+
+    assert server_registry.verify(username="marko", password=raw_pat) == "human:marko"
+
+
+def test_already_running_registry_sees_rotation_by_separate_instance(tmp_path: Path) -> None:
+    path = tmp_path / "users.json"
+    server_registry = UserAccessRegistry(path)
+    cli_registry = UserAccessRegistry(path)
+    old_pat = cli_registry.create_user(username="marko", agent_api_user_id="human:marko")
+
+    new_pat = cli_registry.rotate_token("marko")
+
+    assert server_registry.verify(username="marko", password=old_pat) is None
+    assert server_registry.verify(username="marko", password=new_pat) == "human:marko"
+
+
+def test_already_running_registry_sees_revocation_by_separate_instance(tmp_path: Path) -> None:
+    path = tmp_path / "users.json"
+    server_registry = UserAccessRegistry(path)
+    cli_registry = UserAccessRegistry(path)
+    raw_pat = cli_registry.create_user(username="marko", agent_api_user_id="human:marko")
+
+    cli_registry.revoke_user("marko")
+
+    assert server_registry.verify(username="marko", password=raw_pat) is None

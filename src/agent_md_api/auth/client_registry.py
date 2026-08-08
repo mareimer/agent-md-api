@@ -34,16 +34,26 @@ def _now() -> str:
 
 
 class ClientRegistry:
+    """Liest die JSON-Datei bei **jedem** Zugriff (read und write) neu von der Platte ein,
+    statt sie nur einmal beim Prozessstart zu laden. Grund: die Bootstrap-CLI
+    (`agent_md_api.cli`) läuft als eigener, kurzlebiger Prozess neben dem laufenden
+    Uvicorn-Worker und schreibt in dieselbe Datei — ohne Reload-on-Access würde ein per
+    CLI angelegter Client (oder Signing-Key) vom schon laufenden Server erst nach einem
+    Neustart gesehen. Bei der erwarteten Größe (bis zu 10 Clients) ist das erneute
+    Einlesen pro Request kein spürbarer Overhead (analog zu `acl/engine.py::load_acl_rules`,
+    das aus demselben Grund pro Request neu lädt statt zu cachen)."""
+
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock: write-Methoden rufen self.get() unter demselben Lock auf
         self._by_client_id: dict[str, ClientRegistryEntry] = {}
         self._by_api_key_hash: dict[str, str] = {}  # hash -> client_id
-        self._load()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _load(self) -> None:
+    def _reload(self) -> None:
+        self._by_client_id = {}
+        self._by_api_key_hash = {}
         if not self._path.exists():
-            self._path.parent.mkdir(parents=True, exist_ok=True)
             return
         raw = json.loads(self._path.read_text(encoding="utf-8"))
         for item in raw:
@@ -58,22 +68,28 @@ class ClientRegistry:
     # ---- Verifikation (Hot Path, spec.md §10) ------------------------------------
 
     def verify_api_key(self, raw_key: str) -> ClientRegistryEntry:
-        client_id = self._by_api_key_hash.get(_hash_api_key(raw_key))
-        if client_id is None:
-            raise UnauthorizedError("Ungültiger Client-API-Key.")
-        entry = self._by_client_id[client_id]
-        if entry.revoked:
-            raise UnauthorizedError(f"Client '{client_id}' ist widerrufen.")
-        return entry
+        with self._lock:
+            self._reload()
+            client_id = self._by_api_key_hash.get(_hash_api_key(raw_key))
+            if client_id is None:
+                raise UnauthorizedError("Ungültiger Client-API-Key.")
+            entry = self._by_client_id[client_id]
+            if entry.revoked:
+                raise UnauthorizedError(f"Client '{client_id}' ist widerrufen.")
+            return entry
 
     def get(self, client_id: str) -> ClientRegistryEntry:
-        entry = self._by_client_id.get(client_id)
-        if entry is None:
-            raise NotFoundError(f"Client '{client_id}' nicht gefunden.")
-        return entry
+        with self._lock:
+            self._reload()
+            entry = self._by_client_id.get(client_id)
+            if entry is None:
+                raise NotFoundError(f"Client '{client_id}' nicht gefunden.")
+            return entry
 
     def list_all(self) -> list[ClientRegistryEntry]:
-        return list(self._by_client_id.values())
+        with self._lock:
+            self._reload()
+            return list(self._by_client_id.values())
 
     def active_signing_key(self, client_id: str, kid: str) -> SigningKey | None:
         entry = self.get(client_id)
@@ -93,6 +109,7 @@ class ClientRegistry:
         fixed_user_id: str | None = None,
     ) -> tuple[ClientRegistryEntry, str]:
         with self._lock:
+            self._reload()
             if client_id in self._by_client_id:
                 raise ValidationError(f"Client '{client_id}' existiert bereits.")
             if type is ClientType.AUTONOMOUS_AGENT and not fixed_user_id:
