@@ -66,6 +66,21 @@ def test_kind_rule_applies_independent_of_path_and_of_user_client() -> None:
     assert engine.can_write(principal=ALICE_WEB, path="irgendwo/notiz.md", kind=Kind.MD) is False
 
 
+def test_kind_rule_applies_to_skill_like_any_other_kind() -> None:
+    """`kind: skill` funktioniert im Kind-Gate genau wie `pii.json`/`md`/`binary` -- z.B.
+    Schreibrecht auf Skill-Dateien nur für einen bestimmten Client (spec.md §3/§8)."""
+    rules = [
+        AclRule(client_id="web-bff", path_prefix="/", read="allow", write="allow"),
+        AclRule(kind=Kind.SKILL, write="deny"),
+    ]
+    engine = AclEngine(rules)
+
+    assert engine.can_read(principal=ALICE_WEB, path="grundbuch.skill", kind=Kind.SKILL) is True
+    assert engine.can_write(principal=ALICE_WEB, path="grundbuch.skill", kind=Kind.SKILL) is False
+    # Andere Dateien derselben Familie bleiben von der Skill-spezifischen Regel unberührt.
+    assert engine.can_write(principal=ALICE_WEB, path="grundbuch.json", kind=Kind.JSON) is True
+
+
 def test_kind_gate_denies_even_when_scope_allows() -> None:
     """Exaktes Beispiel aus dem Docstring von acl/engine.py: eine Blanket-Client-Regel
     erlaubt alles, eine kind-Regel verbietet pii.json trotzdem — Kombination ist

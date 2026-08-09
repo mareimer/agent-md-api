@@ -56,6 +56,38 @@ def test_full_write_creates_new_file(client: TestClient, admin_headers: dict[str
     assert after["content"] == "Ganz neu"
 
 
+def test_skill_file_full_write_and_edit_via_http(client: TestClient, admin_headers: dict[str, str]) -> None:
+    """Dateifamilie grundbuch.pdf/.skill/.json (spec.md §3) -- `.skill` läuft über dieselben
+    /file-Endpunkte wie jede andere Text-Datei, `kind` wird korrekt aus dem Dateinamen erkannt."""
+    write = client.post(
+        "/api/v1/file/grundbuch.skill",
+        json={"content": "Suche nach 'Eigentümer:' und trage den Namen in grundbuch.json ein.", "reason": "Skill anlegen"},
+        headers=admin_headers,
+    )
+    assert write.status_code == 200, write.text
+
+    get_resp = client.get("/api/v1/file/grundbuch.skill", headers=admin_headers)
+    assert get_resp.status_code == 200
+    body = get_resp.json()
+    assert body["kind"] == "skill"
+    assert "Eigentümer" in body["content"]
+
+    edit = client.post(
+        "/api/v1/file/grundbuch.skill/edit",
+        json={
+            "old_str": "Suche nach 'Eigentümer:'",
+            "new_str": "Suche nach 'Eingetragener Eigentümer:'",
+            "if_version": body["version"],
+            "reason": "Skill präzisieren",
+        },
+        headers=admin_headers,
+    )
+    assert edit.status_code == 200, edit.text
+
+    after = client.get("/api/v1/file/grundbuch.skill", headers=admin_headers).json()
+    assert "Eingetragener Eigentümer" in after["content"]
+
+
 def test_delete_endpoint(client: TestClient, admin_headers: dict[str, str]) -> None:
     version = client.get("/api/v1/file/data.json", headers=admin_headers).json()["version"]
 

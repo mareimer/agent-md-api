@@ -44,11 +44,18 @@ from agent_md_api.domain.models import (
 
 
 def classify_kind(path: str) -> Kind:
-    """Kind-Zuordnung rein aus dem Dateinamen (spec.md §3) — `.pii.json` vor `.json` prüfen."""
+    """Kind-Zuordnung rein aus dem Dateinamen (spec.md §3) — `.pii.json` vor `.json` prüfen.
+
+    `.skill` steht für eine Datei derselben Familie (gleicher Basisname, z.B.
+    `grundbuch.pdf`/`grundbuch.skill`/`grundbuch.json`), die beschreibt, wie die
+    strukturierten Varianten aus dem zugrundeliegenden Dokument gewonnen werden —
+    rein deskriptiv, die Agent-API führt daraus nichts aus (spec.md §3)."""
     if path.endswith(".pii.json"):
         return Kind.PII_JSON
     if path.endswith(".json"):
         return Kind.JSON
+    if path.endswith(".skill"):
+        return Kind.SKILL
     if path.endswith(".md"):
         return Kind.MD
     return Kind.BINARY

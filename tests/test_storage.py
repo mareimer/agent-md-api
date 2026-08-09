@@ -14,8 +14,8 @@ from agent_md_api.domain.errors import (
     VersionConflictError,
     WrongKindError,
 )
-from agent_md_api.domain.models import Principal, TransactionOperation, TransactionOperationType
-from agent_md_api.storage.git_repo import GitStorage
+from agent_md_api.domain.models import Kind, Principal, TransactionOperation, TransactionOperationType
+from agent_md_api.storage.git_repo import GitStorage, classify_kind
 
 PRINCIPAL = Principal(user_id="human:alice", client_id="web-bff")
 
@@ -187,3 +187,50 @@ def test_commit_message_omits_task_marker_when_no_task_id(storage: GitStorage) -
     header = storage._repo.head.commit.message.splitlines()[0]  # noqa: SLF001
     assert header == "[user:human:alice] [client:web-bff] Ohne Task"
     assert "[task:" not in header
+
+
+# ---- classify_kind (spec.md §3) --------------------------------------------------------
+
+
+def test_classify_kind_skill() -> None:
+    assert classify_kind("grundbuch.skill") == Kind.SKILL
+
+
+def test_classify_kind_skill_is_a_text_kind() -> None:
+    """`.skill`-Dateien sind wie `.md`/`.json` per str_replace/append/Full-Write editierbar,
+    nicht wie `binary` nur per Full-Replace (spec.md §3/§5)."""
+    from agent_md_api.domain.models import TEXT_KINDS
+
+    assert Kind.SKILL in TEXT_KINDS
+
+
+def test_classify_kind_still_distinguishes_json_md_and_pii_json() -> None:
+    """Regression: `.skill` darf die bestehende Reihenfolge/Zuordnung nicht verändern."""
+    assert classify_kind("vertrag.json") == Kind.JSON
+    assert classify_kind("vertrag.pii.json") == Kind.PII_JSON
+    assert classify_kind("notiz.md") == Kind.MD
+    assert classify_kind("scan.pdf") == Kind.BINARY
+
+
+def test_skill_file_roundtrip_via_storage(storage: GitStorage) -> None:
+    """Eine Dateifamilie: `.skill` liegt neben `.json`/`.md` mit demselben Basisnamen und
+    verhält sich wie jede andere Text-Datei -- volle Schreib-/Edit-Semantik, eigene Version."""
+    write_op = TransactionOperation(
+        path="grundbuch.skill",
+        type=TransactionOperationType.WRITE,
+        content="1. Öffne die PDF.\n2. Suche nach 'Eigentümer:'.\n3. Trage den Namen in grundbuch.json ein.",
+        if_version=None,
+    )
+    storage.run_transaction([write_op], principal=PRINCIPAL, reason="Skill anlegen", task_id=None)
+
+    file = storage.get_file("grundbuch.skill")
+    assert file.kind == Kind.SKILL
+    assert "Eigentümer" in (file.content or "")
+
+    version = file.version
+    edit_op = _edit_op("grundbuch.skill", "1. Öffne die PDF.", "1. Öffne das gescannte Dokument.", version)
+    storage.run_transaction([edit_op], principal=PRINCIPAL, reason="Skill präzisieren", task_id=None)
+
+    updated = storage.get_file("grundbuch.skill")
+    assert "gescannte Dokument" in (updated.content or "")
+    assert updated.version != version

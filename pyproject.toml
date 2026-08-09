@@ -1,7 +1,7 @@
 [project]
 name = "agent-md-api"
 version = "0.1.0"
-description = "Generischer API-Layer für Agenten (Mensch und KI) auf Bäume aus Markdown-/JSON-/PII-JSON-/Binärdateien."
+description = "Generic API layer for agents (human and AI) accessing trees of Markdown/JSON/PII-JSON/binary files."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

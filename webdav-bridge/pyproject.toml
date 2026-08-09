@@ -1,7 +1,7 @@
 [project]
 name = "webdav-bridge"
 version = "0.1.0"
-description = "WebDAV-Bridge für die Agent-API — Menschen greifen dateibasiert über den Explorer zu (spec.md §14). Generisch, keine Fachdatenkopplung."
+description = "WebDAV bridge for the Agent API — humans access files via Explorer/Finder (spec.md §14). Generic, no domain-data coupling."
 requires-python = ">=3.11"
 dependencies = [
     "wsgidav>=4.3",

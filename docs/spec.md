@@ -30,9 +30,22 @@ autonome Agenten                       └────────────�
 
 ## 3. Datenmodell
 
-- `kind`: `dir` | `md` | `json` | `pii.json` | `binary` | `pii.binary`
+- `kind`: `dir` | `md` | `json` | `pii.json` | `skill` | `binary` | `pii.binary`
 - Versions-Token je Datei: bei Text-Kinds Hash/Timestamp, bei `binary`/`pii.binary` der Hash der Bytes
 - Storage-Backend: Git-Arbeitsbaum. Jede Transaktion erzeugt genau einen Commit (Audit, §9)
+
+**Dateifamilien und `.skill`-Dateien (implementiert):** Mehrere Dateien mit demselben Basisnamen, aber unterschiedlichem `kind`, bilden eine **Dateifamilie** — z.B. `grundbuch.pdf` (`binary`, die Quelle), `grundbuch.skill` (Anleitung zur Extraktion) und `grundbuch.json` (das Ergebnis). Reine Namenskonvention, keine eigene Datenstruktur: die Agent-API kennt keine Verknüpfung zwischen den Dateien einer Familie außer dem gemeinsamen Präfix.
+
+Eine `.skill`-Datei beschreibt, **wie** die strukturierten Varianten (`json`/`pii.json`/`md`) einer Familie aus dem zugrundeliegenden Dokument gewonnen werden — nicht das Ergebnis selbst. Rein deskriptiv, **kein Ausführungsmotor in der Agent-API**: `kind: skill`-Dateien werden wie jede andere Text-Datei gespeichert, versioniert, per ACL geschützt und auditiert (§8/§9) — die Extraktion selbst führt der aufrufende Agent oder die Orchestrierungsebene darüber aus, nie die Agent-API (§1: keine Domänenlogik).
+
+Eine Dateifamilie bezieht sich auf **0–n Quelldokumente**, im Normalfall genau eins:
+- **1 Dokument** (Normalfall): eine hochgeladene Binärdatei (z.B. ein gescannter Grundbuchauszug). Bei stark strukturierten Dokumenten lässt sich oft (nahezu) vollständig extrahieren; bei individuell formulierten (z.B. Versicherungsverträgen) zumindest ein fester Kernbestand an Feldern.
+- **0 Dokumente**: das Skill beschreibt stattdessen z.B. Rückfragen an einen Menschen oder eine Recherche in externen Quellen (Web, andere Systeme) — es gibt keine Binärdatei in der Familie, auf die sich das Skill bezieht.
+- **n Dokumente**: mehrere Quellen tragen zu einer Extraktion bei.
+
+Welche Quelle(n) ein Skill konkret referenziert, steht als Freitext im Skill-Inhalt selbst — die Agent-API validiert oder verfolgt das nicht. Kein eigener `PII_SKILL`-Kind: eine Anleitung ist selbst keine personenbezogene Angabe, auch wenn sie beschreibt, wie PII extrahiert wird (analog zu `md`, das ebenfalls keine eigene PII-Variante hat — nur `json` und `binary` haben mit `pii.json`/`pii.binary` eine).
+
+**Typischer Trigger** (liegt außerhalb der Agent-API): eine neue Binärdatei wird in eine Familie mit vorhandenem `.skill` hochgeladen — die Orchestrierungsebene erkennt das (z.B. über einen neuen `write`-Audit-Eintrag mit `kind: binary` in einem Verzeichnis mit passendem `.skill`, §9) und stößt die Extraktion an.
 
 **PII-Erkennung generisch am Dateinamen, nicht kind-spezifisch hartkodiert:** `pii.json` war bisher der einzige Sonderfall (`path.endswith(".pii.json")`, `storage/git_repo.py::classify_kind`). Generalisiert auf eine einheitliche Regel: **jeder Dateiname, der das Infix `.pii.` enthält**, gilt als PII-klassifiziert — unabhängig von der eigentlichen Endung. `bericht.pii.json` → `pii.json` (wie bisher), `foto.pii.jpg` → `pii.binary` (neu), alles andere ohne `.pii.`-Infix → `json`/`md`/`binary` wie bisher. Grund: Bildinhalte lassen sich nicht feldscharf in PII/Nicht-PII trennen wie JSON-Felder — bei einem Foto mit erkennbaren Personen ist die *ganze Datei* PII, das muss sich also am `kind` der Datei selbst zeigen, nicht erst in einem Sidecar (§7.1). Nebeneffekt: ein zur Originaldatei gehöriges Sidecar wie `foto.pii.jpg.json` matcht automatisch mit — konsistent restriktiv, kein Sonderfall nötig.
 

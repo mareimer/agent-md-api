@@ -26,6 +26,7 @@ Hand agents a shared filesystem and you get a race condition without an error me
 - **Git as the history.** Each transaction becomes one commit with a mandatory `reason`, plus the acting user, client and task. `git log` is the audit trail for content.
 - **A WebDAV bridge for humans.** Mount the same tree as a network drive and edit files in Explorer or Finder. Same permissions, same audit, same concurrency rules — humans are just another client, not an exception.
 - **Metadata for binaries via a naming convention, not a special case.** Want structured metadata next to an image or other binary (e.g. `photo.jpg`)? Write it to `photo.jpg.meta.json` — an ordinary `kind: json` file, versioned and access-controlled like any other. No dedicated `kind`, no schema baked into the API: what fields belong in that JSON is entirely up to your application.
+- **`kind: skill` files describe how to extract structured data, without the API ever executing anything.** A file family shares a base name across kinds — `deed.pdf` (the source), `deed.skill` (instructions for turning it into structured data), `deed.json` (the result). The API stores, versions, ACL-protects, and audits `.skill` files exactly like any other text file; running the extraction is entirely up to the calling agent or orchestration layer.
 
 ## Quick start
 

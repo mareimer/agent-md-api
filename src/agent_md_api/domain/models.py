@@ -12,10 +12,11 @@ class Kind(StrEnum):
     MD = "md"
     JSON = "json"
     PII_JSON = "pii.json"
+    SKILL = "skill"
     BINARY = "binary"
 
 
-TEXT_KINDS = {Kind.MD, Kind.JSON, Kind.PII_JSON}
+TEXT_KINDS = {Kind.MD, Kind.JSON, Kind.PII_JSON, Kind.SKILL}
 
 
 class TreeEntry(BaseModel):

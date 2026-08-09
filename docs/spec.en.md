@@ -30,9 +30,22 @@ autonomous agents                      └────────────�
 
 ## 3. Data model
 
-- `kind`: `dir` | `md` | `json` | `pii.json` | `binary` | `pii.binary`
+- `kind`: `dir` | `md` | `json` | `pii.json` | `skill` | `binary` | `pii.binary`
 - Version token per file: hash/timestamp for text kinds, hash of the bytes for `binary`/`pii.binary`
 - Storage backend: git working tree. Every transaction produces exactly one commit (audit, §9)
+
+**File families and `.skill` files (implemented):** Several files sharing the same base name but different `kind`s form a **file family** — e.g. `deed.pdf` (`binary`, the source), `deed.skill` (extraction instructions) and `deed.json` (the result). Purely a naming convention, not its own data structure: the Agent API knows no link between the files in a family beyond the shared prefix.
+
+A `.skill` file describes **how** the structured variants (`json`/`pii.json`/`md`) of a family are derived from the underlying document — not the result itself. Purely descriptive, **no execution engine in the Agent API**: `kind: skill` files are stored, versioned, ACL-protected, and audited (§8/§9) exactly like any other text file — the actual extraction is run by the calling agent or the orchestration layer on top, never by the Agent API itself (§1: no domain logic).
+
+A file family refers to **0–n source documents**, typically exactly one:
+- **1 document** (the common case): an uploaded binary file (e.g. a scanned land registry excerpt). Highly structured documents can often be extracted (nearly) completely; individually worded ones (e.g. insurance policies) at least yield a fixed core set of fields.
+- **0 documents**: the skill instead describes, say, questions to ask a human, or research against external sources (the web, other systems) — there's no binary file in the family for it to refer to.
+- **n documents**: several sources contribute to one extraction.
+
+Which source(s) a skill actually refers to is free text inside the skill's own content — the Agent API neither validates nor tracks it. No separate `PII_SKILL` kind: instructions aren't personal data themselves, even when they describe how to extract PII (matching `md`, which likewise has no PII variant of its own — only `json` and `binary` have one, via `pii.json`/`pii.binary`).
+
+**Typical trigger** (outside the Agent API): a new binary file gets uploaded into a family that already has a `.skill` — the orchestration layer notices (e.g. via a new `write` audit entry with `kind: binary` in a directory that has a matching `.skill`, §9) and kicks off extraction.
 
 **Generic filename-based PII detection, not hardcoded per kind:** `pii.json` used to be the only special case (`path.endswith(".pii.json")`, `storage/git_repo.py::classify_kind`). Generalized into one rule: **any filename containing the `.pii.` infix** is PII-classified, regardless of the actual extension. `report.pii.json` → `pii.json` (unchanged), `photo.pii.jpg` → `pii.binary` (new), anything else without the `.pii.` infix → `json`/`md`/`binary` as before. Reason: unlike JSON fields, image content can't be split field-by-field into PII/non-PII — a photo showing identifiable people is PII as a *whole file*, so that has to show up at the file's `kind` itself, not only in a sidecar (§7.1). Side effect: a sidecar belonging to the original, e.g. `photo.pii.jpg.json`, matches automatically too — consistently restrictive, no special case needed.
 
