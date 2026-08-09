@@ -10,3 +10,4 @@ webdav-users.json
 instance.lock
 *.pem
 .env
+CONTEXT-HANDOFF.md
