@@ -27,6 +27,7 @@ Hand agents a shared filesystem and you get a race condition without an error me
 - **A WebDAV bridge for humans.** Mount the same tree as a network drive and edit files in Explorer or Finder. Same permissions, same audit, same concurrency rules — humans are just another client, not an exception.
 - **Metadata for binaries via a naming convention, not a special case.** Want structured metadata next to an image or other binary (e.g. `photo.jpg`)? Write it to `photo.jpg.meta.json` — an ordinary `kind: json` file, versioned and access-controlled like any other. No dedicated `kind`, no schema baked into the API: what fields belong in that JSON is entirely up to your application.
 - **`kind: skill` files describe how to extract structured data, without the API ever executing anything.** A file family shares a base name across kinds — `deed.pdf` (the source), `deed.skill` (instructions for turning it into structured data), `deed.json` (the result). The API stores, versions, ACL-protects, and audits `.skill` files exactly like any other text file; running the extraction is entirely up to the calling agent or orchestration layer.
+- **Domain-specific layout via a plain `STRUCTURE.md`, not API config.** Which directories exist, which `kind`s belong where, naming rules — documented as an ordinary file at the tree root that agents read like anything else. Not enforced by the API (what counts as "valid" is domain-specific), and deliberately not under `_system/`, so it stays openly readable regardless of how tightly that directory gets locked down. See [`docs/example-structure.md`](docs/example-structure.md).
 
 ## Quick start
 
@@ -96,7 +97,7 @@ Honest list, so you find out here rather than later:
 - **PII detection only covers `pii.json` today.** A binary file can't yet be flagged as PII the same way (imagine a photo showing identifiable people) — `kind` recognizes `pii.json` but not, say, `foto.pii.jpg`. A generic rule (any filename containing `.pii.` gets the PII treatment, regardless of extension) is designed but not implemented — see `docs/spec.md` §3/§7.1/§8.
 - **WebDAV bridge:** `MOVE`/`COPY` are atomic for text files (one transaction), but not for binaries or when moving into a directory that does not exist yet. Directory `DELETE`/`MOVE` are not implemented.
 - **Audit query** is only supported by the SQLite backend; `jsonl` is for shipping to Loki/ELK/CloudWatch and expects you to query there.
-- **Documentation is partly in German.** The specification (`docs/spec.md`) and the source comments are German; the API contract and this README are English.
+- **Source comments are German.** The specification is now available in both German (`docs/spec.md`) and English (`docs/spec.en.md`); the source code's own comments are still German-only.
 
 ## Status
 
@@ -105,8 +106,9 @@ Used in production by one project. The API shape is stable and covered by ~145 t
 ## Documentation
 
 - [`docs/openapi.yaml`](docs/openapi.yaml) — the HTTP contract (OpenAPI 3.1)
-- [`docs/spec.md`](docs/spec.md) — design specification with rationale *(German)*
-- [`docs/deployment.md`](docs/deployment.md) — container setup, configuration, operational constraints *(German)*
+- [`docs/spec.md`](docs/spec.md) *(German)* / [`docs/spec.en.md`](docs/spec.en.md) *(English)* — design specification with rationale
+- [`docs/deployment.md`](docs/deployment.md) *(German)* / [`docs/deployment.en.md`](docs/deployment.en.md) *(English)* — container setup, configuration, operational constraints
+- [`docs/example-structure.md`](docs/example-structure.md) — template for a domain-specific `STRUCTURE.md` (spec.md §3)
 
 ## License
 
