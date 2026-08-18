@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -234,3 +236,56 @@ def test_skill_file_roundtrip_via_storage(storage: GitStorage) -> None:
     updated = storage.get_file("grundbuch.skill")
     assert "gescannte Dokument" in (updated.content or "")
     assert updated.version != version
+
+
+# ---- Thread-Sicherheit bei parallelen Reads (Produktions-Bug: gitdb-Race nach Neustart) -----
+
+
+def test_concurrent_reads_are_serialized_through_the_lock(storage: GitStorage) -> None:
+    """Regression: `git.Repo`/gitdb halten intern einen lazy befüllten Tree-/Blob-Cache
+    (`gitdb.util.LazyMixin`), der nicht thread-sicher ist. FastAPI führt synchrone Endpunkte/
+    Dependencies in einem Thread-Pool aus (spec.md §6-Docstring in git_repo.py) — mehrere
+    gleichzeitige `GET /file`-Requests liefen bisher ungebremst parallel durch `_blob_version`
+    und konnten in Produktion, besonders direkt nach einem Neustart mit noch leerem Cache,
+    denselben Cache-Slot gleichzeitig befüllen. Beobachtet als `IndexError`/`binascii.Error`
+    mitten in gitdb, nicht als echte Repo-Korruption (`git fsck` blieb sauber).
+
+    Statt auf den seltenen, timing-abhängigen Crash zu warten: direkt nachweisen, dass nie
+    zwei Threads gleichzeitig in `_blob_version` sind, indem die Methode instrumentiert und
+    das Zeitfenster künstlich vergrößert wird (`time.sleep`) -- ohne den Fix in `get_file`
+    (Lock um den gesamten Lesezugriff) würde `max_concurrent` hier > 1 werden."""
+    concurrent_calls = 0
+    max_concurrent = 0
+    guard = threading.Lock()
+    original_blob_version = storage._blob_version  # noqa: SLF001
+
+    def instrumented_blob_version(path: str) -> str | None:
+        nonlocal concurrent_calls, max_concurrent
+        with guard:
+            concurrent_calls += 1
+            max_concurrent = max(max_concurrent, concurrent_calls)
+        try:
+            time.sleep(0.01)  # Zeitfenster künstlich vergrößern, damit ein Race sicher auffällt
+            return original_blob_version(path)
+        finally:
+            with guard:
+                concurrent_calls -= 1
+
+    storage._blob_version = instrumented_blob_version  # type: ignore[method-assign]  # noqa: SLF001
+
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            storage.get_file("readme.md")
+        except Exception as exc:  # noqa: BLE001 - jede Exception hier wäre der reproduzierte Bug
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Concurrent get_file() raised: {errors}"
+    assert max_concurrent == 1, "Zwei Threads waren gleichzeitig in _blob_version -- Lock schützt Reads nicht."

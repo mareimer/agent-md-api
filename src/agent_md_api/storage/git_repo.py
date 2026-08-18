@@ -1,11 +1,26 @@
 """Git-Arbeitsbaum als Storage-Backend (spec.md §3/§6).
 
 Locking-Modell (spec.md §6, sicherheitskritisch — kein Implementierungsdetail):
-Ein `threading.Lock` umschließt Phase 1 (Validierung) + Phase 2 (Datei-Writes +
-Commit) einer Transaktion vollständig. `threading.Lock` statt `asyncio.Lock`,
-weil GitPython/Dateisystem-I/O blockierend ist und FastAPI synchrone Handler
-in einem Thread-Pool ausführt — die Sperre muss also über Threads hinweg
-gelten, nicht nur über Coroutinen innerhalb eines Event-Loops.
+Ein `threading.RLock` umschließt sowohl Phase 1 (Validierung) + Phase 2
+(Datei-Writes + Commit) einer Transaktion vollständig, als auch **jeden
+lesenden Zugriff** (`get_file`, `get_file_content_bytes`, `list_tree`).
+`threading.RLock` statt `asyncio.Lock`, weil GitPython/Dateisystem-I/O
+blockierend ist und FastAPI synchrone Handler/Dependencies in einem
+Thread-Pool ausführt — die Sperre muss also über Threads hinweg gelten,
+nicht nur über Coroutinen innerhalb eines Event-Loops.
+
+**Warum auch Reads sperren, nicht nur Writes:** `git.Repo`/gitdb halten
+intern einen lazy befüllten Tree-/Blob-Cache (`gitdb.util.LazyMixin`), der
+NICHT thread-sicher ist. Laufen mehrere Reads gleichzeitig auf verschiedenen
+Threads (z.B. direkt nach einem Prozess-Neustart, wenn der Cache noch leer
+ist und mehrere Requests gleichzeitig ankommen), können zwei Threads
+denselben Cache-Slot gleichzeitig befüllen — beobachtet als `IndexError`
+bzw. `binascii.Error` mitten in `gitdb/util.py`, nicht als Datenkorruption
+im Repo selbst. Genau das beschreibt spec.md §6 ohnehin schon als
+gewolltes Verhalten ("Reads während der Schreibphase... über dieselbe Lock
+kurz zurückgestellt") — hier lediglich konsequent auf **jeden** Read
+ausgeweitet, nicht nur auf die Schreibphase, weil die zugrunde liegende
+gitdb-Race unabhängig von einer laufenden Transaktion auftritt.
 
 Voraussetzung: genau ein Worker-Prozess pro Instanz (main.py prüft das beim
 Start hart). Innerhalb dieses einen Prozesses schützt der Lock zuverlässig
@@ -89,7 +104,11 @@ class GitStorage:
                 "Migration/`git init` sind ein eigener, vorgelagerter Schritt."
             ) from exc
         self._root = Path(self._repo.working_tree_dir)  # type: ignore[arg-type]
-        self._lock = threading.Lock()
+        # RLock, nicht Lock: locked public read methods (get_file/list_tree) rufen private
+        # Helper auf, die selbst wieder öffentliche Methoden aufrufen könnten (aktuell nicht
+        # der Fall, aber ein plain Lock würde bei einer künftigen Änderung still deadlocken
+        # statt laut zu knallen — dasselbe Muster wie bei ClientRegistry).
+        self._lock = threading.RLock()
 
     # ---- Read-Pfad (spec.md §4) -------------------------------------------------
 
@@ -113,14 +132,15 @@ class GitStorage:
             raise NotFoundError(f"Pfad nicht gefunden: /{root}")
 
         entries: list[TreeEntry] = []
-        if depth == 0:
-            # "nur Metadaten von root" (spec.md §4) — root selbst als einzelner Eintrag,
-            # keine Kinder. Für die Baumwurzel ("") gibt es keine sinnvolle Selbst-
-            # Metadaten-Darstellung (kein Pfad, kein Blob) -> leere Liste.
-            if root:
-                entries.append(self._entry_for(base, root))
-        else:
-            self._walk(base, root, depth, entries)
+        with self._lock:
+            if depth == 0:
+                # "nur Metadaten von root" (spec.md §4) — root selbst als einzelner Eintrag,
+                # keine Kinder. Für die Baumwurzel ("") gibt es keine sinnvolle Selbst-
+                # Metadaten-Darstellung (kein Pfad, kein Blob) -> leere Liste.
+                if root:
+                    entries.append(self._entry_for(base, root))
+            else:
+                self._walk(base, root, depth, entries)
         entries.sort(key=lambda e: e.path)
 
         # Einfache alphabetische Cursor-Pagination (spec.md §4) — Feinschliff (Seitengröße
@@ -177,13 +197,14 @@ class GitStorage:
         if not full.exists() or full.is_dir():
             raise NotFoundError(f"Datei nicht gefunden: /{path}")
         kind = classify_kind(path)
-        version = self._blob_version(path)
-        assert version is not None  # Datei existiert im Arbeitsbaum -> muss committet sein (Regelfall)
-        if kind in TEXT_KINDS:
-            # size aus dem Inhalt berechnet, nicht stat().st_size — Begründung in _entry_for().
-            content = full.read_text(encoding="utf-8")
-            return FileResponse(path=path, kind=kind, version=version, size=len(content.encode("utf-8")), content=content)
-        return FileResponse(path=path, kind=kind, version=version, size=full.stat().st_size, mime_type=guess_mime_type(path))
+        with self._lock:
+            version = self._blob_version(path)
+            assert version is not None  # Datei existiert im Arbeitsbaum -> muss committet sein (Regelfall)
+            if kind in TEXT_KINDS:
+                # size aus dem Inhalt berechnet, nicht stat().st_size — Begründung in _entry_for().
+                content = full.read_text(encoding="utf-8")
+                return FileResponse(path=path, kind=kind, version=version, size=len(content.encode("utf-8")), content=content)
+            return FileResponse(path=path, kind=kind, version=version, size=full.stat().st_size, mime_type=guess_mime_type(path))
 
     def get_file_content_bytes(self, path: str) -> tuple[bytes, str]:
         full = self._resolve(path)
@@ -191,7 +212,8 @@ class GitStorage:
             raise NotFoundError(f"Datei nicht gefunden: /{path}")
         if classify_kind(path) in TEXT_KINDS:
             raise WrongKindError(f"/{path} ist kein `binary` — GET /file/{{path}} statt .../content nutzen.")
-        return full.read_bytes(), guess_mime_type(path)
+        with self._lock:
+            return full.read_bytes(), guess_mime_type(path)
 
     def _resolve(self, path: str) -> Path:
         full = (self._root / path.strip("/")).resolve()
